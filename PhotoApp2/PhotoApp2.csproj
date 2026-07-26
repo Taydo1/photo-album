@@ -24,6 +24,7 @@
     <Content Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
     <Content Include="Assets\StoreLogo.png" />
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
+    <None Include="Assets\Models\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -43,11 +44,12 @@
     <PackageReference Include="CommunityToolkit.WinUI.Controls.Sizers" Version="8.2.251219" />
     <PackageReference Include="Magick.NET-Q16-AnyCPU" Version="14.15.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.28.0" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
     <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260627" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
+    <PackageReference Include="Microsoft.Windows.AI.MachineLearning" Version="2.1.74" ExcludeAssets="all" />
   </ItemGroup>
 
   <!--
@@ -66,4 +68,12 @@
     <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
     <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">False</PublishTrimmed>
   </PropertyGroup>
+
+  <Target Name="RemoveDuplicateOnnxRuntimeDll" BeforeTargets="_ComputeAppxPackagePayload;GetCopyToOutputDirectoryItems">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)" Condition="$([System.String]::Copy('%(Identity)').ToLower().Contains('microsoft.windows.ai.machinelearning'))" />
+      <RuntimeCopyLocalItems Remove="@(RuntimeCopyLocalItems)" Condition="$([System.String]::Copy('%(Identity)').ToLower().Contains('microsoft.windows.ai.machinelearning'))" />
+      <AppxPackagePayload Remove="@(AppxPackagePayload)" Condition="$([System.String]::Copy('%(Identity)').ToLower().Contains('microsoft.windows.ai.machinelearning'))" />
+    </ItemGroup>
+  </Target>
 </Project>

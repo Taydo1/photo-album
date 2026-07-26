@@ -22,6 +22,7 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <PackageReference Include="Magick.NET-Q16-AnyCPU" Version="14.15.0" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
     <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260627" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
   </ItemGroup>
@@ -33,5 +34,6 @@
 
   <ItemGroup>
     <None Include="TestImages\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\PhotoApp2\Assets\Models\**" Link="Assets\Models\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

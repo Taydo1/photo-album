@@ -4,9 +4,6 @@ using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading.Tasks;
 using OpenCvSharp;
-using Windows.Graphics.Imaging;
-using Windows.Media.FaceAnalysis;
-using Windows.Storage;
 using PhotoApp2.Models;
 using ImageMagick;
 
@@ -14,7 +11,7 @@ namespace PhotoApp2.Services
 {
     public class PhotoAnalyzerService
     {
-        private FaceDetector? _faceDetector;
+        private OnnxFaceDetector? _faceDetector;
 
         public async Task InitializeAsync()
         {
@@ -22,11 +19,12 @@ namespace PhotoApp2.Services
             {
                 try
                 {
-                    _faceDetector = await FaceDetector.CreateAsync();
+                    _faceDetector = new OnnxFaceDetector();
+                    await _faceDetector.InitializeAsync();
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"Error initializing FaceDetector: {ex.Message}");
+                    Debug.WriteLine($"Error initializing OnnxFaceDetector: {ex.Message}");
                 }
             }
         }
@@ -118,50 +116,25 @@ namespace PhotoApp2.Services
         {
             double sharpness = 0;
             int faces = 0;
-            byte[]? rawBytes = null;
-            int width = 0, height = 0;
 
             try
             {
-                // Decode once into native 8-bit Grayscale and compute sharpness on thread pool
-                await Task.Run(() =>
+                // Decode once into native Grayscale and run high-speed sharpness + GPU ONNX face detection
+                using var mat = await Task.Run(() => Cv2.ImRead(filePath, ImreadModes.Grayscale));
+                if (!mat.Empty())
                 {
-                    using var mat = Cv2.ImRead(filePath, ImreadModes.Grayscale);
-                    if (!mat.Empty())
+                    await Task.Run(() =>
                     {
                         using var laplacian = new Mat();
                         Cv2.Laplacian(mat, laplacian, MatType.CV_64F);
                         Cv2.MeanStdDev(laplacian, out _, out var stddev);
                         sharpness = stddev.Val0 * stddev.Val0;
+                    });
 
-                        if (_faceDetector != null)
-                        {
-                            width = mat.Width;
-                            height = mat.Height;
-                            int size = width * height;
-                            rawBytes = new byte[size];
-                            System.Runtime.InteropServices.Marshal.Copy(mat.Data, rawBytes, 0, size);
-                        }
-                    }
-                });
-
-                if (rawBytes != null && _faceDetector != null)
-                {
-                    try
+                    if (_faceDetector != null)
                     {
-                        var buffer = rawBytes.AsBuffer();
-                        using var softwareBitmap = SoftwareBitmap.CreateCopyFromBuffer(buffer, BitmapPixelFormat.Gray8, width, height);
-                        var detectedFaces = await _faceDetector.DetectFacesAsync(softwareBitmap);
-                        faces = detectedFaces.Count;
-                        return (sharpness, faces);
+                        faces = await _faceDetector.DetectFacesAsync(mat);
                     }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"Direct buffer face detection failed: {ex.Message}");
-                    }
-                }
-                else if (sharpness > 0)
-                {
                     return (sharpness, faces);
                 }
             }
@@ -174,15 +147,11 @@ namespace PhotoApp2.Services
                 using var memStream = new MemoryStream();
                 magickImage.Format = MagickFormat.Jpeg;
                 magickImage.Write(memStream);
-                memStream.Position = 0;
-
-                var decoder = await BitmapDecoder.CreateAsync(memStream.AsRandomAccessStream());
-                using var bgraBitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore);
-                using var grayBitmap = SoftwareBitmap.Convert(bgraBitmap, BitmapPixelFormat.Gray8);
-                if (_faceDetector != null && grayBitmap != null)
+                
+                using var fallbackMat = Cv2.ImDecode(memStream.ToArray(), ImreadModes.Grayscale);
+                if (!fallbackMat.Empty() && _faceDetector != null)
                 {
-                    var detectedFaces = await _faceDetector.DetectFacesAsync(grayBitmap);
-                    faces = detectedFaces.Count;
+                    faces = await _faceDetector.DetectFacesAsync(fallbackMat);
                 }
             }
             catch { }
