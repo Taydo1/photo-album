@@ -74,6 +74,55 @@ namespace PhotoApp2.Services
             await command.ExecuteNonQueryAsync();
         }
 
+        public async Task SavePhotosAsync(IEnumerable<PhotoItem> photos)
+        {
+            if (photos == null || !photos.Any()) return;
+
+            using var connection = new SqliteConnection($"Data Source={_dbPath}");
+            await connection.OpenAsync();
+            using var transaction = connection.BeginTransaction();
+
+            var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = @"
+                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, SceneCategory, IsFavorite)
+                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $SceneCategory, $IsFavorite)
+                ON CONFLICT(FilePath) DO UPDATE SET
+                    IsAnalyzed = excluded.IsAnalyzed,
+                    SharpnessScore = excluded.SharpnessScore,
+                    FaceCount = excluded.FaceCount,
+                    SceneCategory = excluded.SceneCategory,
+                    IsFavorite = excluded.IsFavorite;
+            ";
+
+            var filePathParam = command.Parameters.Add("$FilePath", SqliteType.Text);
+            var fileNameParam = command.Parameters.Add("$FileName", SqliteType.Text);
+            var dateTakenParam = command.Parameters.Add("$DateTaken", SqliteType.Text);
+            var fileSizeBytesParam = command.Parameters.Add("$FileSizeBytes", SqliteType.Integer);
+            var isAnalyzedParam = command.Parameters.Add("$IsAnalyzed", SqliteType.Integer);
+            var sharpnessScoreParam = command.Parameters.Add("$SharpnessScore", SqliteType.Real);
+            var faceCountParam = command.Parameters.Add("$FaceCount", SqliteType.Integer);
+            var sceneCategoryParam = command.Parameters.Add("$SceneCategory", SqliteType.Text);
+            var isFavoriteParam = command.Parameters.Add("$IsFavorite", SqliteType.Integer);
+
+            foreach (var photo in photos)
+            {
+                filePathParam.Value = photo.FilePath;
+                fileNameParam.Value = photo.FileName;
+                dateTakenParam.Value = photo.DateTaken.ToString("o");
+                fileSizeBytesParam.Value = photo.FileSizeBytes;
+                isAnalyzedParam.Value = photo.IsAnalyzed ? 1 : 0;
+                sharpnessScoreParam.Value = photo.SharpnessScore;
+                faceCountParam.Value = photo.FaceCount;
+                sceneCategoryParam.Value = photo.SceneCategory ?? "";
+                isFavoriteParam.Value = photo.IsFavorite ? 1 : 0;
+
+                await command.ExecuteNonQueryAsync();
+            }
+
+            await transaction.CommitAsync();
+        }
+
         public async Task<List<PhotoItem>> GetAllPhotosAsync()
         {
             var photos = new List<PhotoItem>();

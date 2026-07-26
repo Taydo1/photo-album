@@ -20,7 +20,14 @@ namespace PhotoApp2.Services
         {
             if (_faceDetector == null)
             {
-                _faceDetector = await FaceDetector.CreateAsync();
+                try
+                {
+                    _faceDetector = await FaceDetector.CreateAsync();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Error initializing FaceDetector: {ex.Message}");
+                }
             }
         }
 
@@ -32,70 +39,36 @@ namespace PhotoApp2.Services
                 FilePath = filePath,
                 FileName = fileInfo.Name,
                 FileSizeBytes = fileInfo.Length,
-                DateTaken = fileInfo.CreationTime, // Better to read EXIF, but this is a fallback
+                DateTaken = fileInfo.CreationTime, // Default fallback
             };
 
             try
             {
-                // Ensure ImageMagick can read it (handles JPG, RAW, HEIC)
-                using var magickImage = new MagickImage(filePath);
-                
-                // Try to get actual DateTaken from EXIF
-                var exifProfile = magickImage.GetExifProfile();
-                if (exifProfile != null)
+                // Task 1: Fast EXIF extraction via Ping (header only, no pixel decode/re-encode)
+                var exifTask = Task.Run(() => ExtractExifDateTaken(filePath));
+
+                // Task 2: Shared visual analysis (OpenCV Grayscale Mat used for both Sharpness and Face Detection)
+                var visualTask = AnalyzeVisualsAsync(filePath);
+
+                // Run EXIF extraction and visual analysis concurrently
+                await Task.WhenAll(exifTask, visualTask);
+
+                if (exifTask.Result.HasValue)
                 {
-                    var dateTakenTag = exifProfile.GetValue(ExifTag.DateTimeOriginal);
-                    if (dateTakenTag != null && DateTime.TryParseExact(dateTakenTag.ToString(), "yyyy:MM:dd HH:mm:ss", null, System.Globalization.DateTimeStyles.None, out var dateTaken))
-                    {
-                        photo.DateTaken = dateTaken;
-                    }
+                    photo.DateTaken = exifTask.Result.Value;
                 }
 
-                // 1. Convert to Bitmap for Windows FaceDetector and OpenCV
-                // We convert it to a standard Jpeg format in memory to ensure compatibility
-                using var memStream = new MemoryStream();
-                magickImage.Format = MagickFormat.Jpeg;
-                magickImage.Write(memStream);
-                memStream.Position = 0;
+                var visualResult = visualTask.Result;
+                photo.SharpnessScore = visualResult.Sharpness;
+                photo.FaceCount = visualResult.Faces;
 
-                // 2. Sharpness Score (Variance of Laplacian) using OpenCV
-                using (var mat = Cv2.ImDecode(memStream.ToArray(), ImreadModes.Grayscale))
-                {
-                    using var laplacian = new Mat();
-                    Cv2.Laplacian(mat, laplacian, MatType.CV_64F);
-                    Cv2.MeanStdDev(laplacian, out var mean, out var stddev);
-                    var variance = stddev.Val0 * stddev.Val0;
-                    photo.SharpnessScore = variance;
-                }
-
-                // 3. Face Detection
-                memStream.Position = 0;
-                var decoder = await BitmapDecoder.CreateAsync(memStream.AsRandomAccessStream());
-                // Decode to Bgra8 which is universally supported and has no dimension restrictions
-                using (var bgraBitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore))
-                {
-                    // FaceDetector expects Gray8 or Nv12. Convert to Gray8 to avoid odd-dimension Nv12 errors.
-                    using (var grayBitmap = SoftwareBitmap.Convert(bgraBitmap, BitmapPixelFormat.Gray8))
-                    {
-                        if (_faceDetector != null && grayBitmap != null)
-                        {
-                            var faces = await _faceDetector.DetectFacesAsync(grayBitmap);
-                            photo.FaceCount = faces.Count;
-                        }
-                    }
-                }
-
-                // 4. Scene Classification (Heuristics / Placeholder for ONNX)
-                // For a full implementation, we'd run an ONNX model here (e.g. ResNet Places365).
-                // As a fallback/heuristic:
+                // 3. Scene Classification
                 if (photo.FaceCount > 0)
                 {
                     photo.SceneCategory = "Person";
                 }
                 else
                 {
-                    // Fallback heuristics based on color/edges could go here, 
-                    // but we will default to Landscape/Other for now until ONNX is integrated.
                     photo.SceneCategory = "Landscape / Other";
                 }
 
@@ -108,6 +81,113 @@ namespace PhotoApp2.Services
             }
 
             return photo;
+        }
+
+        private static DateTime? ExtractExifDateTaken(string filePath)
+        {
+            try
+            {
+                // Ping header only without decompressing pixel data
+                using var magickImage = new MagickImage();
+                magickImage.Ping(filePath);
+                
+                var exifProfile = magickImage.GetExifProfile();
+                if (exifProfile != null)
+                {
+                    var dateTakenTag = exifProfile.GetValue(ExifTag.DateTimeOriginal);
+                    if (dateTakenTag != null && DateTime.TryParseExact(
+                        dateTakenTag.ToString(), 
+                        "yyyy:MM:dd HH:mm:ss", 
+                        null, 
+                        System.Globalization.DateTimeStyles.None, 
+                        out var dateTaken))
+                    {
+                        return dateTaken;
+                    }
+                }
+            }
+            catch
+            {
+                // Fallback date taken remains FileInfo.CreationTime
+            }
+
+            return null;
+        }
+
+        private async Task<(double Sharpness, int Faces)> AnalyzeVisualsAsync(string filePath)
+        {
+            double sharpness = 0;
+            int faces = 0;
+            byte[]? rawBytes = null;
+            int width = 0, height = 0;
+
+            try
+            {
+                // Decode once into native 8-bit Grayscale and compute sharpness on thread pool
+                await Task.Run(() =>
+                {
+                    using var mat = Cv2.ImRead(filePath, ImreadModes.Grayscale);
+                    if (!mat.Empty())
+                    {
+                        using var laplacian = new Mat();
+                        Cv2.Laplacian(mat, laplacian, MatType.CV_64F);
+                        Cv2.MeanStdDev(laplacian, out _, out var stddev);
+                        sharpness = stddev.Val0 * stddev.Val0;
+
+                        if (_faceDetector != null)
+                        {
+                            width = mat.Width;
+                            height = mat.Height;
+                            int size = width * height;
+                            rawBytes = new byte[size];
+                            System.Runtime.InteropServices.Marshal.Copy(mat.Data, rawBytes, 0, size);
+                        }
+                    }
+                });
+
+                if (rawBytes != null && _faceDetector != null)
+                {
+                    try
+                    {
+                        var buffer = rawBytes.AsBuffer();
+                        using var softwareBitmap = SoftwareBitmap.CreateCopyFromBuffer(buffer, BitmapPixelFormat.Gray8, width, height);
+                        var detectedFaces = await _faceDetector.DetectFacesAsync(softwareBitmap);
+                        faces = detectedFaces.Count;
+                        return (sharpness, faces);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Direct buffer face detection failed: {ex.Message}");
+                    }
+                }
+                else if (sharpness > 0)
+                {
+                    return (sharpness, faces);
+                }
+            }
+            catch { }
+
+            // Fallback for non-standard image formats (e.g. HEIC/RAW) via ImageMagick transcode
+            try
+            {
+                using var magickImage = new MagickImage(filePath);
+                using var memStream = new MemoryStream();
+                magickImage.Format = MagickFormat.Jpeg;
+                magickImage.Write(memStream);
+                memStream.Position = 0;
+
+                var decoder = await BitmapDecoder.CreateAsync(memStream.AsRandomAccessStream());
+                using var bgraBitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore);
+                using var grayBitmap = SoftwareBitmap.Convert(bgraBitmap, BitmapPixelFormat.Gray8);
+                if (_faceDetector != null && grayBitmap != null)
+                {
+                    var detectedFaces = await _faceDetector.DetectFacesAsync(grayBitmap);
+                    faces = detectedFaces.Count;
+                }
+            }
+            catch { }
+
+            return (sharpness, faces);
         }
     }
 }

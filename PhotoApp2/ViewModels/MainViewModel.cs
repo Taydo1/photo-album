@@ -193,27 +193,47 @@ namespace PhotoApp2.ViewModels
             }
 
             await _analyzerService.InitializeAsync();
+            await _dbService.InitializeAsync();
 
-            foreach (var photo in toAnalyze)
+            var progress = new Progress<int>(count =>
             {
-                StatusMessage = $"Analyzing... {AnalyzedPhotos}/{TotalPhotos}";
-                
-                var analyzedPhoto = await _analyzerService.AnalyzePhotoAsync(photo.FilePath);
-                
-                // Copy values
-                photo.IsAnalyzed = true;
-                photo.SharpnessScore = analyzedPhoto.SharpnessScore;
-                photo.FaceCount = analyzedPhoto.FaceCount;
-                photo.SceneCategory = analyzedPhoto.SceneCategory;
-                
-                if (analyzedPhoto.DateTaken != default && analyzedPhoto.DateTaken != photo.DateTaken)
-                {
-                    photo.DateTaken = analyzedPhoto.DateTaken;
-                }
+                AnalyzedPhotos = count;
+                StatusMessage = $"Analyzing... {count}/{TotalPhotos}";
+            });
+            var reporter = (IProgress<int>)progress;
+            int completedCount = 0;
 
-                await _dbService.SavePhotoAsync(photo);
-                
-                AnalyzedPhotos++;
+            // Process in rolling batches of 100 photos as requested
+            const int batchSize = 100;
+            var chunks = toAnalyze.Chunk(batchSize);
+
+            foreach (var chunk in chunks)
+            {
+                await Task.Run(async () =>
+                {
+                    await Parallel.ForEachAsync(chunk, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, async (photo, ct) =>
+                    {
+                        var analyzedPhoto = await _analyzerService.AnalyzePhotoAsync(photo.FilePath);
+
+                        // Copy values
+                        photo.IsAnalyzed = true;
+                        photo.SharpnessScore = analyzedPhoto.SharpnessScore;
+                        photo.FaceCount = analyzedPhoto.FaceCount;
+                        photo.SceneCategory = analyzedPhoto.SceneCategory;
+
+                        if (analyzedPhoto.DateTaken != default && analyzedPhoto.DateTaken != photo.DateTaken)
+                        {
+                            photo.DateTaken = analyzedPhoto.DateTaken;
+                        }
+
+                        var current = System.Threading.Interlocked.Increment(ref completedCount);
+                        reporter.Report(current);
+                    });
+                });
+
+                // Save completed batch of up to 100 photos in a single high-speed database transaction
+                StatusMessage = $"Saving batch of {chunk.Length} photos to database...";
+                await _dbService.SavePhotosAsync(chunk);
             }
 
             StatusMessage = $"Analyzed {TotalPhotos} photos.";
