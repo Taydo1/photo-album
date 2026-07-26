@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "PhotoApp2 (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "PhotoApp2 (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
