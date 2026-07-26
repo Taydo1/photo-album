@@ -1,9 +1,12 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
 using PhotoApp2.ViewModels;
 using System;
 using WinRT.Interop;
 using System.ComponentModel;
 using PhotoApp2.Models;
+using Windows.Storage.Pickers;
+using Windows.System;
 
 namespace PhotoApp2
 {
@@ -12,8 +15,6 @@ namespace PhotoApp2
         public MainViewModel ViewModel { get; }
 
         public event PropertyChangedEventHandler? PropertyChanged;
-
-        public bool IsPhotoSelected => ViewModel.SelectedPhoto != null;
 
         public MainWindow()
         {
@@ -24,41 +25,59 @@ namespace PhotoApp2
             {
                 if (e.PropertyName == nameof(ViewModel.SelectedPhoto))
                 {
-                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsPhotoSelected)));
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ViewModel.SelectedPhoto)));
                 }
             };
-
-            // Load photos initially
-            _ = ViewModel.LoadPhotosAsync();
         }
 
-        private void ImportFolder_Click(object sender, RoutedEventArgs e)
+        private async void OpenFolder_Click(object sender, RoutedEventArgs e)
         {
             var hwnd = WindowNative.GetWindowHandle(this);
-            ViewModel.ImportFolderCommand.Execute(hwnd);
+            var folderPicker = new FolderPicker();
+            InitializeWithWindow.Initialize(folderPicker, hwnd);
+            folderPicker.FileTypeFilter.Add("*");
+
+            var folder = await folderPicker.PickSingleFolderAsync();
+            if (folder != null)
+            {
+                await ViewModel.OpenFolderAsync(folder.Path);
+            }
         }
 
-        private void ExportFavorites_Click(object sender, RoutedEventArgs e)
+        private void AnalyzePhotos_Click(object sender, RoutedEventArgs e)
         {
-            var hwnd = WindowNative.GetWindowHandle(this);
-            ViewModel.ExportFavoritesCommand.Execute(hwnd);
+            ViewModel.AnalyzePhotosCommand.Execute(null);
         }
 
-        private void AutoGenerateAlbum_Click(object sender, RoutedEventArgs e)
+        private async void AutoGenerateAlbum_Click(object sender, RoutedEventArgs e)
         {
             var hwnd = WindowNative.GetWindowHandle(this);
-            ViewModel.AutoGenerateAlbumCommand.Execute(hwnd);
+            var folderPicker = new FolderPicker();
+            InitializeWithWindow.Initialize(folderPicker, hwnd);
+            folderPicker.FileTypeFilter.Add("*");
+
+            var destFolder = await folderPicker.PickSingleFolderAsync();
+            if (destFolder != null)
+            {
+                await ViewModel.ExecuteAutoGenerateAlbumAsync(destFolder.Path);
+            }
         }
 
         private async void FavoriteToggle_Click(object sender, RoutedEventArgs e)
         {
             if (ViewModel.SelectedPhoto != null)
             {
-                // Because SelectedPhoto.IsFavorite is updated via TwoWay binding, 
-                // we just need to persist it.
                 await App.Database.UpdateFavoriteStatusAsync(ViewModel.SelectedPhoto.FilePath, ViewModel.SelectedPhoto.IsFavorite);
-                
-                // Force UI refresh if needed, but ObservableObject should handle it
+            }
+        }
+
+        private async void Grid_KeyDown(object sender, KeyRoutedEventArgs e)
+        {
+            if (e.Key == VirtualKey.Space && ViewModel.SelectedPhoto != null)
+            {
+                ViewModel.SelectedPhoto.IsFavorite = !ViewModel.SelectedPhoto.IsFavorite;
+                await App.Database.UpdateFavoriteStatusAsync(ViewModel.SelectedPhoto.FilePath, ViewModel.SelectedPhoto.IsFavorite);
+                e.Handled = true;
             }
         }
     }

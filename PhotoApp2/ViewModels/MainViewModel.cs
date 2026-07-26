@@ -5,14 +5,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using PhotoApp2.Models;
 using PhotoApp2.Services;
-using Windows.Storage.Pickers;
-using WinRT.Interop;
-using Windows.Storage;
 
 namespace PhotoApp2.ViewModels
 {
@@ -23,6 +19,12 @@ namespace PhotoApp2.ViewModels
 
         [ObservableProperty]
         private ObservableCollection<PhotoItem> _photos = new();
+
+        [ObservableProperty]
+        private ObservableCollection<FolderNode> _folderNodes = new();
+
+        [ObservableProperty]
+        private FolderNode? _selectedFolderNode;
 
         [ObservableProperty]
         private bool _isAnalyzing;
@@ -45,6 +47,9 @@ namespace PhotoApp2.ViewModels
 
         [ObservableProperty]
         private bool _showPeopleOnly;
+
+        [ObservableProperty]
+        private bool _isGalleryVisible = true;
         
         private List<PhotoItem> _allPhotosCache = new();
 
@@ -62,26 +67,54 @@ namespace PhotoApp2.ViewModels
             StatusMessage = $"Loaded {_allPhotosCache.Count} photos.";
         }
 
-        [RelayCommand]
-        private async Task ImportFolderAsync(IntPtr hwnd)
+        public async Task OpenFolderAsync(string rootFolderPath)
         {
-            var folderPicker = new FolderPicker();
-            InitializeWithWindow.Initialize(folderPicker, hwnd);
-            folderPicker.FileTypeFilter.Add("*");
-
-            var folder = await folderPicker.PickSingleFolderAsync();
-            if (folder != null)
+            StatusMessage = $"Scanning {rootFolderPath}...";
+            FolderNodes.Clear();
+            
+            var rootNode = new FolderNode
             {
-                await AnalyzeFolderAsync(folder.Path);
-            }
+                FolderName = Path.GetFileName(rootFolderPath) ?? rootFolderPath,
+                FolderPath = rootFolderPath,
+                IsExpanded = true
+            };
+            
+            await Task.Run(() => BuildFolderTree(rootFolderPath, rootNode));
+            
+            FolderNodes.Add(rootNode);
+
+            // Load all files from these folders into our cache if they aren't already
+            await LoadFilesFromFolderAsync(rootFolderPath);
+            
+            SelectedFolderNode = rootNode;
+            StatusMessage = "Folder opened.";
         }
 
-        private async Task AnalyzeFolderAsync(string folderPath)
+        private void BuildFolderTree(string path, FolderNode parentNode)
         {
-            IsAnalyzing = true;
-            StatusMessage = $"Scanning {folderPath}...";
+            try
+            {
+                var dirs = Directory.GetDirectories(path);
+                foreach (var dir in dirs)
+                {
+                    var node = new FolderNode
+                    {
+                        FolderName = Path.GetFileName(dir),
+                        FolderPath = dir
+                    };
+                    BuildFolderTree(dir, node);
+                    
+                    // Only add if it or its children have photos, but for simplicity we'll add all for now
+                    // Or we could check for files
+                    parentNode.Children.Add(node);
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+        }
 
-            var files = Directory.GetFiles(folderPath, "*.*", SearchOption.TopDirectoryOnly)
+        private async Task LoadFilesFromFolderAsync(string folderPath)
+        {
+            var files = Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories)
                 .Where(f => f.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
                             f.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
                             f.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
@@ -90,48 +123,43 @@ namespace PhotoApp2.ViewModels
                             f.EndsWith(".nef", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            TotalPhotos = files.Count;
-            AnalyzedPhotos = 0;
-            StatusMessage = $"Found {TotalPhotos} photos. Analyzing...";
-
-            await _analyzerService.InitializeAsync();
-
-            var newPhotos = new List<PhotoItem>();
+            var dbPhotos = await _dbService.GetAllPhotosAsync();
+            _allPhotosCache = dbPhotos;
 
             foreach (var file in files)
             {
-                // Check if already in DB
-                var existing = _allPhotosCache.FirstOrDefault(p => p.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase));
-                if (existing != null && existing.IsAnalyzed)
+                if (!_allPhotosCache.Any(p => p.FilePath.Equals(file, StringComparison.OrdinalIgnoreCase)))
                 {
-                    AnalyzedPhotos++;
-                    continue;
+                    var fileInfo = new FileInfo(file);
+                    _allPhotosCache.Add(new PhotoItem
+                    {
+                        FilePath = file,
+                        FileName = fileInfo.Name,
+                        FileSizeBytes = fileInfo.Length,
+                        DateTaken = fileInfo.CreationTime,
+                        IsAnalyzed = false
+                    });
                 }
-
-                var photo = await _analyzerService.AnalyzePhotoAsync(file);
-                await _dbService.SavePhotoAsync(photo);
-                
-                // Update cache
-                if (existing != null)
-                {
-                    _allPhotosCache.Remove(existing);
-                }
-                _allPhotosCache.Add(photo);
-
-                AnalyzedPhotos++;
-                StatusMessage = $"Analyzing... {AnalyzedPhotos}/{TotalPhotos}";
             }
-
-            IsAnalyzing = false;
-            await LoadPhotosAsync();
         }
 
+        partial void OnSelectedFolderNodeChanged(FolderNode? value) => ApplyFilters();
         partial void OnShowFavoritesOnlyChanged(bool value) => ApplyFilters();
         partial void OnShowPeopleOnlyChanged(bool value) => ApplyFilters();
 
         private void ApplyFilters()
         {
+            if (SelectedFolderNode == null)
+            {
+                Photos.Clear();
+                return;
+            }
+
             var filtered = _allPhotosCache.AsEnumerable();
+            
+            // Filter by folder recursively
+            filtered = filtered.Where(p => p.FilePath.StartsWith(SelectedFolderNode.FolderPath, StringComparison.OrdinalIgnoreCase));
+
             if (ShowFavoritesOnly)
             {
                 filtered = filtered.Where(p => p.IsFavorite);
@@ -145,43 +173,61 @@ namespace PhotoApp2.ViewModels
         }
 
         [RelayCommand]
-        private async Task ExportFavoritesAsync(IntPtr hwnd)
+        private async Task AnalyzePhotosAsync()
         {
-            var favorites = _allPhotosCache.Where(p => p.IsFavorite).ToList();
-            if (!favorites.Any()) return;
+            if (SelectedFolderNode == null) return;
 
-            var folderPicker = new FolderPicker();
-            InitializeWithWindow.Initialize(folderPicker, hwnd);
-            folderPicker.FileTypeFilter.Add("*");
+            IsAnalyzing = true;
+            var toAnalyze = Photos.Where(p => !p.IsAnalyzed).ToList();
+            
+            TotalPhotos = toAnalyze.Count;
+            AnalyzedPhotos = 0;
 
-            var destFolder = await folderPicker.PickSingleFolderAsync();
-            if (destFolder == null) return;
-
-            StatusMessage = "Exporting favorites...";
-            int count = 0;
-            foreach (var photo in favorites)
+            if (TotalPhotos == 0)
             {
-                var destPath = Path.Combine(destFolder.Path, photo.FileName);
-                if (!File.Exists(destPath))
-                {
-                    File.Copy(photo.FilePath, destPath);
-                }
-                count++;
+                StatusMessage = "All photos in this folder are already analyzed.";
+                IsAnalyzing = false;
+                return;
             }
-            StatusMessage = $"Exported {count} photos to {destFolder.Name}.";
+
+            await _analyzerService.InitializeAsync();
+
+            foreach (var photo in toAnalyze)
+            {
+                StatusMessage = $"Analyzing... {AnalyzedPhotos}/{TotalPhotos}";
+                
+                var analyzedPhoto = await _analyzerService.AnalyzePhotoAsync(photo.FilePath);
+                
+                // Copy values
+                photo.IsAnalyzed = true;
+                photo.SharpnessScore = analyzedPhoto.SharpnessScore;
+                photo.FaceCount = analyzedPhoto.FaceCount;
+                photo.SceneCategory = analyzedPhoto.SceneCategory;
+                
+                if (analyzedPhoto.DateTaken != default && analyzedPhoto.DateTaken != photo.DateTaken)
+                {
+                    photo.DateTaken = analyzedPhoto.DateTaken;
+                }
+
+                await _dbService.SavePhotoAsync(photo);
+                
+                AnalyzedPhotos++;
+            }
+
+            StatusMessage = $"Analyzed {TotalPhotos} photos.";
+            IsAnalyzing = false;
+            ApplyFilters(); // Refresh display
         }
 
         [RelayCommand]
-        private async Task AutoGenerateAlbumAsync(IntPtr hwnd)
+        private async Task AutoGenerateAlbumAsync()
+        {
+            // We will hook this up in code-behind to pass the destination folder
+        }
+        
+        public async Task ExecuteAutoGenerateAlbumAsync(string destFolderPath)
         {
             if (!_allPhotosCache.Any()) return;
-
-            var folderPicker = new FolderPicker();
-            InitializeWithWindow.Initialize(folderPicker, hwnd);
-            folderPicker.FileTypeFilter.Add("*");
-
-            var destFolder = await folderPicker.PickSingleFolderAsync();
-            if (destFolder == null) return;
 
             StatusMessage = "Generating album pages...";
             
@@ -214,13 +260,11 @@ namespace PhotoApp2.ViewModels
 
             foreach (var ev in events)
             {
-                // Assign a quota based on event size, but minimum 1
                 int quota = Math.Max(1, (int)((double)ev.Count / candidates.Count * targetTotal));
                 
-                // Sort by a heuristic score: Sharpness + Faces (we weight faces heavily)
                 var bestInEvent = ev.OrderByDescending(p => p.SharpnessScore + (p.FaceCount * 500))
                                     .Take(quota)
-                                    .OrderBy(p => p.DateTaken) // Re-sort by time
+                                    .OrderBy(p => p.DateTaken) 
                                     .ToList();
                 
                 selectedPhotos.AddRange(bestInEvent);
@@ -234,8 +278,6 @@ namespace PhotoApp2.ViewModels
             foreach (var photo in selectedPhotos)
             {
                 currentPage.Add(photo);
-                // Simple heuristic: if we have 6 photos, maybe start a new page
-                // Or if there's a large time gap
                 if (currentPage.Count >= 6)
                 {
                     pages.Add(currentPage);
@@ -248,11 +290,13 @@ namespace PhotoApp2.ViewModels
             int pageIndex = 1;
             foreach (var page in pages)
             {
-                var pageFolder = await destFolder.CreateFolderAsync($"Page_{pageIndex:D3}", Windows.Storage.CreationCollisionOption.OpenIfExists);
+                var pageFolder = Path.Combine(destFolderPath, $"Page_{pageIndex:D3}");
+                Directory.CreateDirectory(pageFolder);
+                
                 int photoIndex = 1;
                 foreach (var photo in page)
                 {
-                    var destPath = Path.Combine(pageFolder.Path, $"{pageIndex:D3}_{photoIndex:D2}_{photo.FileName}");
+                    var destPath = Path.Combine(pageFolder, $"{pageIndex:D3}_{photoIndex:D2}_{photo.FileName}");
                     if (!File.Exists(destPath))
                     {
                         File.Copy(photo.FilePath, destPath);

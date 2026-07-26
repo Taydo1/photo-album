@@ -52,9 +52,9 @@ namespace PhotoApp2.Services
                 }
 
                 // 1. Convert to Bitmap for Windows FaceDetector and OpenCV
-                // We convert it to a standard format (JPG or BMP) in memory
+                // We convert it to a standard Jpeg format in memory to ensure compatibility
                 using var memStream = new MemoryStream();
-                magickImage.Format = MagickFormat.Bmp;
+                magickImage.Format = MagickFormat.Jpeg;
                 magickImage.Write(memStream);
                 memStream.Position = 0;
 

@@ -6,10 +6,11 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:models="using:PhotoApp2.Models"
+    xmlns:controls="using:CommunityToolkit.WinUI.Controls"
     mc:Ignorable="d"
     Title="Photo Selection App">
 
-    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyDown="Grid_KeyDown">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -17,9 +18,10 @@
 
         <!-- Command Bar -->
         <CommandBar DefaultLabelPosition="Right" VerticalAlignment="Top">
-            <AppBarButton Icon="Folder" Label="Import Folder" Click="ImportFolder_Click"/>
-            <AppBarButton Icon="Save" Label="Export Favorites" Click="ExportFavorites_Click"/>
+            <AppBarButton Icon="Folder" Label="Open Folder" Click="OpenFolder_Click"/>
+            <AppBarButton Icon="Find" Label="Analyze Photos" Click="AnalyzePhotos_Click"/>
             <AppBarButton Icon="Pictures" Label="Auto-Generate Album" Click="AutoGenerateAlbum_Click"/>
+            <AppBarToggleButton Icon="DockLeft" Label="Toggle Gallery" IsChecked="{x:Bind ViewModel.IsGalleryVisible, Mode=TwoWay}"/>
             
             <CommandBar.Content>
                 <StackPanel Orientation="Horizontal" Spacing="12" Margin="12,12,0,0">
@@ -34,66 +36,93 @@
         </CommandBar>
 
         <!-- Main Content -->
-        <SplitView Grid.Row="1" IsPaneOpen="{x:Bind IsPhotoSelected, Mode=OneWay}" DisplayMode="Inline" OpenPaneLength="400" PanePlacement="Right">
-            <SplitView.Content>
-                <!-- Gallery -->
-                <GridView ItemsSource="{x:Bind ViewModel.Photos, Mode=OneWay}"
-                          SelectedItem="{x:Bind ViewModel.SelectedPhoto, Mode=TwoWay}"
-                          SelectionMode="Single"
-                          Padding="12">
-                    <GridView.ItemTemplate>
-                        <DataTemplate x:DataType="models:PhotoItem">
-                            <Grid Width="150" Height="150" Margin="4">
-                                <!-- Ideally, we load a thumbnail here. For now we use the full path, which might be slow. -->
-                                <Image Source="{x:Bind FilePath}" Stretch="UniformToFill"/>
-                                <Border Background="#80000000" VerticalAlignment="Bottom" Padding="4">
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="{x:Bind FaceCount}" Foreground="White" FontSize="10" Margin="0,0,8,0"/>
-                                        <TextBlock Text="{x:Bind SceneCategory}" Foreground="White" FontSize="10"/>
-                                    </StackPanel>
-                                </Border>
-                                <FontIcon Glyph="&#xE735;" 
-                                          Foreground="Yellow" 
-                                          Visibility="{x:Bind IsFavorite, Mode=OneWay}" 
-                                          HorizontalAlignment="Right" VerticalAlignment="Top" Margin="4"/>
-                            </Grid>
-                        </DataTemplate>
-                    </GridView.ItemTemplate>
-                </GridView>
-            </SplitView.Content>
-            
-            <SplitView.Pane>
-                <!-- Detail View -->
-                <Grid Padding="12" Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="250" MinWidth="150"/>
+                <ColumnDefinition Width="Auto"/>
+                <!-- Gallery Column -->
+                <ColumnDefinition Width="*" MinWidth="150"/>
+                <ColumnDefinition Width="Auto"/>
+                <!-- Detail Column -->
+                <ColumnDefinition Width="2*" MinWidth="300"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 1. Tree View (Folders) -->
+            <TreeView ItemsSource="{x:Bind ViewModel.FolderNodes, Mode=OneWay}" 
+                      SelectedItem="{x:Bind ViewModel.SelectedFolderNode, Mode=TwoWay}"
+                      SelectionMode="Single"
+                      Padding="8">
+                <TreeView.ItemTemplate>
+                    <DataTemplate x:DataType="models:FolderNode">
+                        <TreeViewItem ItemsSource="{x:Bind Children, Mode=OneWay}" 
+                                      IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                                      Content="{x:Bind FolderName, Mode=OneWay}">
+                        </TreeViewItem>
+                    </DataTemplate>
+                </TreeView.ItemTemplate>
+            </TreeView>
+
+            <controls:GridSplitter Grid.Column="1" Width="8" ResizeDirection="Columns" Background="Transparent" />
+
+            <!-- 2. Gallery View -->
+            <GridView Grid.Column="2" 
+                      ItemsSource="{x:Bind ViewModel.Photos, Mode=OneWay}"
+                      SelectedItem="{x:Bind ViewModel.SelectedPhoto, Mode=TwoWay}"
+                      SelectionMode="Single"
+                      Visibility="{x:Bind ViewModel.IsGalleryVisible, Mode=OneWay}"
+                      Padding="12">
+                <GridView.ItemTemplate>
+                    <DataTemplate x:DataType="models:PhotoItem">
+                        <Grid Width="150" Height="150" Margin="4">
+                            <Image Source="{x:Bind FilePath}" Stretch="UniformToFill"/>
+                            <Border Background="#80000000" VerticalAlignment="Bottom" Padding="4">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{x:Bind FaceCount}" Foreground="White" FontSize="10" Margin="0,0,8,0"/>
+                                    <TextBlock Text="{x:Bind SceneCategory}" Foreground="White" FontSize="10"/>
+                                </StackPanel>
+                            </Border>
+                            <FontIcon Glyph="&#xE735;" 
+                                      Foreground="Yellow" 
+                                      Visibility="{x:Bind IsFavorite, Mode=OneWay}" 
+                                      HorizontalAlignment="Right" VerticalAlignment="Top" Margin="4"/>
+                        </Grid>
+                    </DataTemplate>
+                </GridView.ItemTemplate>
+            </GridView>
+
+            <controls:GridSplitter Grid.Column="3" Width="8" ResizeDirection="Columns" Background="Transparent" 
+                                   Visibility="{x:Bind ViewModel.IsGalleryVisible, Mode=OneWay}" />
+
+            <!-- 3. Detail View -->
+            <Grid Grid.Column="4" Padding="12" Background="{ThemeResource SystemControlBackgroundChromeMediumLowBrush}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                
+                <Image Source="{x:Bind ViewModel.SelectedPhoto.FilePath, Mode=OneWay}" Stretch="Uniform"/>
+                
+                <StackPanel Grid.Row="1" Spacing="8" Margin="0,12,0,0">
+                    <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.FileName, Mode=OneWay}" FontWeight="Bold" TextWrapping="Wrap" FontSize="18"/>
+                    <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.DateTaken, Mode=OneWay}"/>
+                    <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.SceneCategory, Mode=OneWay}"/>
                     
-                    <Image Source="{x:Bind ViewModel.SelectedPhoto.FilePath, Mode=OneWay}" Stretch="Uniform"/>
-                    
-                    <StackPanel Grid.Row="1" Spacing="8" Margin="0,12,0,0">
-                        <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.FileName, Mode=OneWay}" FontWeight="Bold" TextWrapping="Wrap"/>
-                        <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.DateTaken, Mode=OneWay}"/>
-                        <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.SceneCategory, Mode=OneWay}"/>
-                        
-                        <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="Sharpness:"/>
-                            <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.SharpnessScore, Mode=OneWay}"/>
-                        </StackPanel>
-                        
-                        <StackPanel Orientation="Horizontal" Spacing="12">
-                            <TextBlock Text="Faces:"/>
-                            <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.FaceCount, Mode=OneWay}"/>
-                        </StackPanel>
-                        
-                        <ToggleButton Content="Favorite" 
-                                      IsChecked="{x:Bind ViewModel.SelectedPhoto.IsFavorite, Mode=TwoWay}" 
-                                      Click="FavoriteToggle_Click"
-                                      HorizontalAlignment="Stretch"/>
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <TextBlock Text="Sharpness:"/>
+                        <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.SharpnessScore, Mode=OneWay}"/>
                     </StackPanel>
-                </Grid>
-            </SplitView.Pane>
-        </SplitView>
+                    
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <TextBlock Text="Faces:"/>
+                        <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.FaceCount, Mode=OneWay}"/>
+                    </StackPanel>
+                    
+                    <ToggleButton Content="Favorite" 
+                                  IsChecked="{x:Bind ViewModel.SelectedPhoto.IsFavorite, Mode=TwoWay}" 
+                                  Click="FavoriteToggle_Click"
+                                  HorizontalAlignment="Stretch"/>
+                </StackPanel>
+            </Grid>
+        </Grid>
     </Grid>
 </Window>
