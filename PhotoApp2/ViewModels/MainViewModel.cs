@@ -1,3 +1,7 @@
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using PhotoApp2.Models;
+using PhotoApp2.Services;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -5,10 +9,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using CommunityToolkit.Mvvm.ComponentModel;
-using CommunityToolkit.Mvvm.Input;
-using PhotoApp2.Models;
-using PhotoApp2.Services;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
 
 namespace PhotoApp2.ViewModels
 {
@@ -218,6 +220,34 @@ namespace PhotoApp2.ViewModels
             IsAnalyzing = false;
             ApplyFilters(); // Refresh display
         }
+
+        [RelayCommand]
+        private async Task ExportFavoritesAsync(IntPtr hwnd)
+        {
+            var favorites = _allPhotosCache.Where(p => p.IsFavorite).ToList();
+            if (!favorites.Any()) return;
+            var folderPicker = new FolderPicker();
+            InitializeWithWindow.Initialize(folderPicker, hwnd);
+            folderPicker.FileTypeFilter.Add("*");
+
+            var destFolder = await folderPicker.PickSingleFolderAsync();
+            if (destFolder == null) return;
+            StatusMessage = "Exporting favorites...";
+            int count = 0;
+            foreach (var photo in favorites)
+            {
+                var destPath = Path.Combine(destFolder.Path, photo.FileName);
+                if (!File.Exists(destPath))
+
+
+                {
+                    File.Copy(photo.FilePath, destPath);
+                }
+                count++;
+            }
+            StatusMessage = $"Exported {count} photos to {destFolder.Name}.";
+        }
+
 
         [RelayCommand]
         private async Task AutoGenerateAlbumAsync()

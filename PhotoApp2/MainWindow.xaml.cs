@@ -71,6 +71,12 @@ namespace PhotoApp2
             }
         }
 
+        private void ExportFavorites_Click(object sender, RoutedEventArgs e)
+        {
+            var hwnd = WindowNative.GetWindowHandle(this);
+            ViewModel.ExportFavoritesCommand.Execute(hwnd);
+        }
+
         private async void Grid_KeyDown(object sender, KeyRoutedEventArgs e)
         {
             if (e.Key == VirtualKey.Space && ViewModel.SelectedPhoto != null)

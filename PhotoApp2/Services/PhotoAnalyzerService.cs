@@ -71,12 +71,17 @@ namespace PhotoApp2.Services
                 // 3. Face Detection
                 memStream.Position = 0;
                 var decoder = await BitmapDecoder.CreateAsync(memStream.AsRandomAccessStream());
-                using (var softwareBitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Nv12, BitmapAlphaMode.Ignore))
+                // Decode to Bgra8 which is universally supported and has no dimension restrictions
+                using (var bgraBitmap = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore))
                 {
-                    if (_faceDetector != null && softwareBitmap != null)
+                    // FaceDetector expects Gray8 or Nv12. Convert to Gray8 to avoid odd-dimension Nv12 errors.
+                    using (var grayBitmap = SoftwareBitmap.Convert(bgraBitmap, BitmapPixelFormat.Gray8))
                     {
-                        var faces = await _faceDetector.DetectFacesAsync(softwareBitmap);
-                        photo.FaceCount = faces.Count;
+                        if (_faceDetector != null && grayBitmap != null)
+                        {
+                            var faces = await _faceDetector.DetectFacesAsync(grayBitmap);
+                            photo.FaceCount = faces.Count;
+                        }
                     }
                 }
 

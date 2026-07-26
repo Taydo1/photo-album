@@ -20,6 +20,7 @@
         <CommandBar DefaultLabelPosition="Right" VerticalAlignment="Top">
             <AppBarButton Icon="Folder" Label="Open Folder" Click="OpenFolder_Click"/>
             <AppBarButton Icon="Find" Label="Analyze Photos" Click="AnalyzePhotos_Click"/>
+            <AppBarButton Icon="Save" Label="Export Favorites" Click="ExportFavorites_Click"/>
             <AppBarButton Icon="Pictures" Label="Auto-Generate Album" Click="AutoGenerateAlbum_Click"/>
             <AppBarToggleButton Icon="DockLeft" Label="Toggle Gallery" IsChecked="{x:Bind ViewModel.IsGalleryVisible, Mode=TwoWay}"/>
             
@@ -74,7 +75,11 @@
                 <GridView.ItemTemplate>
                     <DataTemplate x:DataType="models:PhotoItem">
                         <Grid Width="150" Height="150" Margin="4">
-                            <Image Source="{x:Bind FilePath}" Stretch="UniformToFill"/>
+                            <Image Stretch="UniformToFill">
+                                <Image.Source>
+                                    <BitmapImage UriSource="{x:Bind FileUri}" DecodePixelWidth="150" DecodePixelHeight="150"/>
+                                </Image.Source>
+                            </Image>
                             <Border Background="#80000000" VerticalAlignment="Bottom" Padding="4">
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="{x:Bind FaceCount}" Foreground="White" FontSize="10" Margin="0,0,8,0"/>

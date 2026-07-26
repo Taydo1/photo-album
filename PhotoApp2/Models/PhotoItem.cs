@@ -11,6 +11,8 @@ namespace PhotoApp2.Models
         public DateTime DateTaken { get; set; }
         public long FileSizeBytes { get; set; }
         
+        public Uri FileUri => new Uri(FilePath);
+
         // Analysis Results
         public bool IsAnalyzed { get; set; }
         public double SharpnessScore { get; set; }
