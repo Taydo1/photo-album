@@ -37,7 +37,7 @@ namespace PhotoApp2.Services
         {
             return Task.Run(() =>
             {
-                progress?.Report("Filtering and clustering photos by holiday trips and events...");
+                progress?.Report("Deduplicating rapid burst shots and cleaning photo candidates...");
 
                 var candidates = allPhotos.Where(p => ((p.IsAnalyzed && p.SharpnessScore > 50) || p.IsFavorite) && !HasExcludedAlbumTag(p))
                                           .OrderBy(p => p.DateTaken)
@@ -46,64 +46,13 @@ namespace PhotoApp2.Services
                 if (!candidates.Any())
                     return new List<AlbumPage>();
 
-                var episodes = new List<List<PhotoItem>>();
-                var currentEpisode = new List<PhotoItem>();
-                PhotoItem? lastPhoto = null;
+                // Deduplicate rapid bursts within a 15-second window across the entire timeline
+                var deduplicated = DeduplicateBursts(candidates, 15.0);
 
-                foreach (var photo in candidates)
-                {
-                    bool isNewEpisode = false;
-                    if (lastPhoto != null)
-                    {
-                        if ((photo.DateTaken - lastPhoto.DateTaken).TotalHours > 6 || photo.DateTaken.Date != lastPhoto.DateTaken.Date)
-                        {
-                            isNewEpisode = true;
-                        }
-                        else if (photo.VisualFeatureVector != null && lastPhoto.VisualFeatureVector != null)
-                        {
-                            double sim = OnnxContentClassifier.CalculateCosineSimilarity(photo.VisualFeatureVector, lastPhoto.VisualFeatureVector);
-                            if (sim < 0.45)
-                            {
-                                isNewEpisode = true;
-                            }
-                        }
-                    }
+                progress?.Report("Clustering photos into meaningful moments (meals, daily events, week-long trips)...");
 
-                    if (isNewEpisode && currentEpisode.Any())
-                    {
-                        episodes.Add(currentEpisode);
-                        currentEpisode = new List<PhotoItem>();
-                    }
-
-                    currentEpisode.Add(photo);
-                    lastPhoto = photo;
-                }
-                if (currentEpisode.Any()) episodes.Add(currentEpisode);
-
-                progress?.Report($"Identified {episodes.Count} chronological & visual episodes. Selecting best photos and deduplicating bursts...");
-
-                var curatedPhotosByEpisode = new List<List<PhotoItem>>();
-                foreach (var episode in episodes)
-                {
-                    var deduplicated = DeduplicateBursts(episode, 15.0);
-                    var scored = deduplicated.OrderByDescending(CalculatePhotoScore).ToList();
-
-                    int quota = Math.Min(scored.Count, Math.Max(10, scored.Count * 8 / 10));
-                    var selected = scored.Take(quota).OrderBy(p => p.DateTaken).ToList();
-
-                    if (selected.Any()) curatedPhotosByEpisode.Add(selected);
-                }
-
-                progress?.Report("Creating rhythm-based thematic pages with visual synergy layout composition...");
-
-                var pages = new List<AlbumPage>();
                 int pageCounter = 1;
-
-                foreach (var episodePhotos in curatedPhotosByEpisode)
-                {
-                    var episodePages = PaginateEpisode(episodePhotos, ref pageCounter);
-                    pages.AddRange(episodePages);
-                }
+                var pages = ClusterIntoMoments(deduplicated, ref pageCounter);
 
                 progress?.Report($"Exporting {pages.Count} album pages to {destFolderPath}...");
 
@@ -224,111 +173,126 @@ namespace PhotoApp2.Services
             return score;
         }
 
-        private List<AlbumPage> PaginateEpisode(List<PhotoItem> episodePhotos, ref int pageCounter)
+        private List<AlbumPage> ClusterIntoMoments(List<PhotoItem> sortedPhotos, ref int pageCounter)
         {
             var pages = new List<AlbumPage>();
-            var currentPagePhotos = new List<PhotoItem>();
+            var currentMomentPhotos = new List<PhotoItem>();
 
-            foreach (var photo in episodePhotos)
+            foreach (var photo in sortedPhotos)
             {
-                if (currentPagePhotos.Any())
+                if (currentMomentPhotos.Any())
                 {
-                    var tentativeKinds = currentPagePhotos.Select(p => GetPrimaryTag(p))
-                                                          .Concat(new[] { GetPrimaryTag(photo) })
-                                                          .Where(k => !string.IsNullOrEmpty(k))
-                                                          .Distinct()
-                                                          .ToList();
-
-                    bool exceedsKinds = tentativeKinds.Count > 2;
-
-                    int targetCap = DetermineTargetCapacity(currentPagePhotos);
-                    bool reachesCap = currentPagePhotos.Count >= targetCap;
-
-                    bool violatesVisualSynergy = false;
-                    if (photo.VisualFeatureVector != null && currentPagePhotos.Count >= 2)
+                    if (ShouldSplitMoment(currentMomentPhotos, photo))
                     {
-                        double avgSim = currentPagePhotos
-                            .Where(p => p.VisualFeatureVector != null)
-                            .Select(p => OnnxContentClassifier.CalculateCosineSimilarity(photo.VisualFeatureVector, p.VisualFeatureVector))
-                            .DefaultIfEmpty(1.0)
-                            .Average();
-
-                        if (avgSim < 0.35)
-                        {
-                            violatesVisualSynergy = true;
-                        }
-                    }
-
-                    if (reachesCap || exceedsKinds || violatesVisualSynergy)
-                    {
-                        pages.Add(CreateAlbumPage(currentPagePhotos, pageCounter++));
-                        currentPagePhotos = new List<PhotoItem>();
+                        pages.Add(CreateAlbumPage(currentMomentPhotos, pageCounter++));
+                        currentMomentPhotos = new List<PhotoItem>();
                     }
                 }
 
-                currentPagePhotos.Add(photo);
+                currentMomentPhotos.Add(photo);
             }
 
-            if (currentPagePhotos.Any())
+            if (currentMomentPhotos.Any())
             {
-                if (currentPagePhotos.Count == 1 && pages.Any())
-                {
-                    var prevPage = pages.Last();
-                    var combinedKinds = prevPage.Photos.Select(p => GetPrimaryTag(p))
-                                                 .Concat(currentPagePhotos.Select(p => GetPrimaryTag(p)))
-                                                 .Where(k => !string.IsNullOrEmpty(k))
-                                                 .Distinct()
-                                                 .Count();
-
-                    if (prevPage.Photos.Count < 6 && combinedKinds <= 2)
-                    {
-                        prevPage.Photos.AddRange(currentPagePhotos);
-                        prevPage.Theme = DeterminePageTheme(prevPage.Photos);
-                        currentPagePhotos.Clear();
-                    }
-                }
-
-                if (currentPagePhotos.Any())
-                {
-                    pages.Add(CreateAlbumPage(currentPagePhotos, pageCounter++));
-                }
+                pages.Add(CreateAlbumPage(currentMomentPhotos, pageCounter++));
             }
 
             return pages;
+        }
+
+        private static bool ShouldSplitMoment(List<PhotoItem> currentPhotos, PhotoItem candidate)
+        {
+            if (!currentPhotos.Any()) return false;
+
+            var lastPhoto = currentPhotos.Last();
+            var firstPhoto = currentPhotos.First();
+
+            double gapHours = (candidate.DateTaken - lastPhoto.DateTaken).TotalHours;
+            double totalSpanHours = (candidate.DateTaken - firstPhoto.DateTaken).TotalHours;
+
+            // 1. Determine moment duration thresholds based on semantic tags of the current moment
+            GetMomentTimeThresholds(currentPhotos, out double maxGapHours, out double maxSpanHours);
+
+            if (gapHours > maxGapHours || totalSpanHours > maxSpanHours)
+            {
+                return true; // Chronological boundary exceeded for this moment type
+            }
+
+            // 2. Tolerance for wrong tags / misclassifications:
+            // If photos are taken close together in time (<= 2.5 hours), NEVER break the moment on tag differences.
+            if (gapHours <= 2.5)
+            {
+                return false;
+            }
+
+            // 3. For wider gaps within the allowed threshold (> 2.5 hours but <= maxGapHours),
+            // check for a sustained thematic divergence rather than an isolated outlier tag.
+            // We tolerate up to 2 mismatched photos (or up to 30% of total) before deciding the moment theme has shifted.
+            string candidateTag = GetPrimaryTag(candidate);
+            var dominantTags = GetDominantTags(currentPhotos);
+
+            if (!dominantTags.Contains(candidateTag, StringComparer.OrdinalIgnoreCase))
+            {
+                int existingOutliers = currentPhotos.Count(p => !dominantTags.Contains(GetPrimaryTag(p), StringComparer.OrdinalIgnoreCase));
+                if (existingOutliers + 1 > Math.Max(2, currentPhotos.Count * 0.3))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void GetMomentTimeThresholds(IEnumerable<PhotoItem> momentPhotos, out double maxGapHours, out double maxSpanHours)
+        {
+            var allTags = momentPhotos.SelectMany(p => p.Tags ?? new List<string>()).Where(t => !string.IsNullOrEmpty(t)).ToList();
+            if (!allTags.Any())
+            {
+                // Default to Day outing moment
+                maxGapHours = 16.0;
+                maxSpanHours = 36.0;
+                return;
+            }
+
+            int mealTags = allTags.Count(t => ContainsAny(t, "Food", "Dining", "Drink", "Restaurant", "Cafe", "Meal", "Kitchen", "Bar", "Beverage"));
+            int weekTags = allTags.Count(t => ContainsAny(t, "Landscape", "Nature", "Travel", "Resort", "Vacation", "Beach", "Coast", "Mountain", "Sunset", "Waterfront", "Forest", "Sea", "Wildlife", "Animal", "Holiday", "Scenic", "Lake", "Valley", "Cliff"));
+            int total = allTags.Count;
+
+            // Meal or dining gathering (short moment)
+            if (mealTags > 0 && (mealTags * 100.0 / total) >= 35)
+            {
+                maxGapHours = 3.5;
+                maxSpanHours = 8.0;
+                return;
+            }
+
+            // Week-long vacation, nature, or scenic trip (extended moment)
+            if (weekTags > 0 && (weekTags * 100.0 / total) >= 35)
+            {
+                maxGapHours = 72.0;   // Allow up to 3 days gap between contiguous trip shots
+                maxSpanHours = 240.0; // Allow up to 10 days total duration
+                return;
+            }
+
+            // Day outing, event, or social activity
+            maxGapHours = 16.0;  // Overnight gap separates day outings
+            maxSpanHours = 36.0; // Allow up to 36 hours for all-day/night events
+        }
+
+        private static bool ContainsAny(string tag, params string[] keywords)
+        {
+            foreach (var kw in keywords)
+            {
+                if (tag.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            return false;
         }
 
         private static string GetPrimaryTag(PhotoItem photo)
         {
             if (photo.Tags == null || !photo.Tags.Any()) return "Other";
             return photo.Tags.First();
-        }
-
-        private static int DetermineTargetCapacity(List<PhotoItem> pagePhotos)
-        {
-            if (!pagePhotos.Any()) return 4;
-
-            bool hasHeroCandidate = pagePhotos.Any(p =>
-                p.Tags.Any(t => t.Contains("Landscape", StringComparison.OrdinalIgnoreCase) || t.Contains("Architecture", StringComparison.OrdinalIgnoreCase)) &&
-                p.SharpnessScore >= 80 && p.FaceCount <= 1);
-
-            if (hasHeroCandidate && pagePhotos.Count <= 2)
-            {
-                return 2;
-            }
-
-            bool isSocialOrEvent = pagePhotos.Any(p =>
-                p.FaceCount >= 2 ||
-                p.Tags.Any(t => t.Contains("Food", StringComparison.OrdinalIgnoreCase) ||
-                                t.Contains("Home", StringComparison.OrdinalIgnoreCase) ||
-                                t.Contains("Leisure", StringComparison.OrdinalIgnoreCase) ||
-                                t.Contains("Person", StringComparison.OrdinalIgnoreCase)));
-
-            if (isSocialOrEvent)
-            {
-                return 5;
-            }
-
-            return 4;
         }
 
         private static AlbumPage CreateAlbumPage(List<PhotoItem> photos, int pageNum)
@@ -342,18 +306,29 @@ namespace PhotoApp2.Services
             return page;
         }
 
+        private static List<string> GetDominantTags(IEnumerable<PhotoItem> photos)
+        {
+            var tagCounts = photos.Select(p => GetPrimaryTag(p))
+                                  .Where(k => !string.IsNullOrEmpty(k) && k != "Other" && k != "Collection")
+                                  .GroupBy(k => k, StringComparer.OrdinalIgnoreCase)
+                                  .Select(g => new { Tag = g.Key, Count = g.Count() })
+                                  .OrderByDescending(x => x.Count)
+                                  .ToList();
+
+            if (!tagCounts.Any())
+                return new List<string> { "Collection" };
+
+            // Select top 1 or 2 dominant categories, effectively ignoring noise or misclassified tags
+            return tagCounts.Take(2).Select(x => x.Tag).OrderBy(x => x).ToList();
+        }
+
         private static string DeterminePageTheme(List<PhotoItem> photos)
         {
-            var kinds = photos.Select(p => GetPrimaryTag(p))
-                              .Where(k => !string.IsNullOrEmpty(k))
-                              .Distinct()
-                              .OrderBy(k => k)
-                              .ToList();
-
-            if (!kinds.Any())
+            var dominant = GetDominantTags(photos);
+            if (!dominant.Any() || (dominant.Count == 1 && dominant[0] == "Collection"))
                 return "Collection";
 
-            return string.Join("_and_", kinds.Select(k => k.Replace(" ", "_")));
+            return string.Join("_and_", dominant.Select(k => k.Replace(" ", "_")));
         }
 
         private static string SanitizeFileName(string name)

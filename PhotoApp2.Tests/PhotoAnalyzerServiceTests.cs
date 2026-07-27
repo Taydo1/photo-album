@@ -369,5 +369,51 @@ namespace PhotoApp2.Tests
             double similarity = OnnxContentClassifier.CalculateCosineSimilarity(vecA, vecB);
             Assert.Equal(1.0, similarity, precision: 4);
         }
+
+        [Fact]
+        public async Task AlbumGeneratorService_ClustersByMomentDuration_AndToleratesMisclassifiedTags()
+        {
+            var generator = new AlbumGeneratorService();
+            var tempDir = Path.Combine(Path.GetTempPath(), "PhotoApp2_TestAlbum_Moments_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            try
+            {
+                var baseDate = new DateTime(2026, 7, 1, 12, 0, 0);
+                var photos = new List<Models.PhotoItem>
+                {
+                    // Meal Moment: tags indicate Food & Dining -> 3.5h max gap separates meal moments
+                    new Models.PhotoItem { Id = 1, FilePath = "m1.jpg", FileName = "m1.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate, Tags = new List<string> { "Food & Dining" } },
+                    new Models.PhotoItem { Id = 2, FilePath = "m2.jpg", FileName = "m2.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(1), Tags = new List<string> { "Restaurant" } },
+                    // Tolerance check: m3 has a wrong/misclassified tag ("Work & Industry"), but taken 30m after m2 -> must NOT break the meal moment!
+                    new Models.PhotoItem { Id = 3, FilePath = "m3.jpg", FileName = "m3.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(1.5), Tags = new List<string> { "Work & Industry" } },
+
+                    // Week/Landscape Moment: starts 5 hours later (>3.5h gap from meal). Because dominant tags are Landscape/Vacation, it allows multi-day gaps (up to 72h).
+                    new Models.PhotoItem { Id = 4, FilePath = "w1.jpg", FileName = "w1.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(8), Tags = new List<string> { "Landscape", "Beach" } },
+                    new Models.PhotoItem { Id = 5, FilePath = "w2.jpg", FileName = "w2.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(8 + 48), Tags = new List<string> { "Vacation", "Resort" } },
+                    new Models.PhotoItem { Id = 6, FilePath = "w3.jpg", FileName = "w3.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(8 + 52), Tags = new List<string> { "Mountain" } }
+                };
+
+                var pages = await generator.GenerateAlbumAsync(photos, tempDir);
+
+                Assert.True(pages.Count >= 2, $"Expected at least 2 moment pages (Meal and Vacation), got {pages.Count}");
+
+                // Page 1 is the Meal moment: photos 1, 2, 3 (including the misclassified photo 3)
+                var page1Ids = pages[0].Photos.Select(p => p.Id).ToList();
+                Assert.Contains(1, page1Ids);
+                Assert.Contains(2, page1Ids);
+                Assert.Contains(3, page1Ids); // Misclassification gracefully tolerated without breaking page!
+
+                // Page 2 is the Vacation moment: photos 4, 5, 6 across contiguous days
+                var page2Ids = pages[1].Photos.Select(p => p.Id).ToList();
+                Assert.Contains(4, page2Ids);
+                Assert.Contains(5, page2Ids);
+                Assert.Contains(6, page2Ids);
+            }
+            finally
+            {
+                if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+            }
+        }
     }
 }
