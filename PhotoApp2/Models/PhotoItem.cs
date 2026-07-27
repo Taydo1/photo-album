@@ -18,6 +18,8 @@ namespace PhotoApp2.Models
         public double SharpnessScore { get; set; }
         public int FaceCount { get; set; }
         public string SceneCategory { get; set; } = string.Empty; // e.g., "Landscape", "Building", "Person", "Other"
+        public string Keywords { get; set; } = string.Empty; // e.g., "person, beautiful landscape, sunset"
+        public string PrimaryKind { get; set; } = string.Empty; // e.g., "Landscape", "Person", "Architecture"
 
         [ObservableProperty]
         private bool _isFavorite;

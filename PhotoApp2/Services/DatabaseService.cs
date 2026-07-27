@@ -38,7 +38,9 @@ namespace PhotoApp2.Services
                     SharpnessScore REAL NOT NULL DEFAULT 0,
                     FaceCount INTEGER NOT NULL DEFAULT 0,
                     SceneCategory TEXT,
-                    IsFavorite INTEGER NOT NULL DEFAULT 0
+                    IsFavorite INTEGER NOT NULL DEFAULT 0,
+                    Keywords TEXT NOT NULL DEFAULT '',
+                    PrimaryKind TEXT NOT NULL DEFAULT ''
                 );
             ";
             await command.ExecuteNonQueryAsync();
@@ -51,14 +53,16 @@ namespace PhotoApp2.Services
 
             var command = connection.CreateCommand();
             command.CommandText = @"
-                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, SceneCategory, IsFavorite)
-                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $SceneCategory, $IsFavorite)
+                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, SceneCategory, IsFavorite, Keywords, PrimaryKind)
+                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $SceneCategory, $IsFavorite, $Keywords, $PrimaryKind)
                 ON CONFLICT(FilePath) DO UPDATE SET
                     IsAnalyzed = excluded.IsAnalyzed,
                     SharpnessScore = excluded.SharpnessScore,
                     FaceCount = excluded.FaceCount,
                     SceneCategory = excluded.SceneCategory,
-                    IsFavorite = excluded.IsFavorite;
+                    IsFavorite = excluded.IsFavorite,
+                    Keywords = excluded.Keywords,
+                    PrimaryKind = excluded.PrimaryKind;
             ";
 
             command.Parameters.AddWithValue("$FilePath", photo.FilePath);
@@ -70,6 +74,8 @@ namespace PhotoApp2.Services
             command.Parameters.AddWithValue("$FaceCount", photo.FaceCount);
             command.Parameters.AddWithValue("$SceneCategory", photo.SceneCategory ?? "");
             command.Parameters.AddWithValue("$IsFavorite", photo.IsFavorite ? 1 : 0);
+            command.Parameters.AddWithValue("$Keywords", photo.Keywords ?? "");
+            command.Parameters.AddWithValue("$PrimaryKind", photo.PrimaryKind ?? "");
 
             await command.ExecuteNonQueryAsync();
         }
@@ -85,14 +91,16 @@ namespace PhotoApp2.Services
             var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = @"
-                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, SceneCategory, IsFavorite)
-                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $SceneCategory, $IsFavorite)
+                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, SceneCategory, IsFavorite, Keywords, PrimaryKind)
+                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $SceneCategory, $IsFavorite, $Keywords, $PrimaryKind)
                 ON CONFLICT(FilePath) DO UPDATE SET
                     IsAnalyzed = excluded.IsAnalyzed,
                     SharpnessScore = excluded.SharpnessScore,
                     FaceCount = excluded.FaceCount,
                     SceneCategory = excluded.SceneCategory,
-                    IsFavorite = excluded.IsFavorite;
+                    IsFavorite = excluded.IsFavorite,
+                    Keywords = excluded.Keywords,
+                    PrimaryKind = excluded.PrimaryKind;
             ";
 
             var filePathParam = command.Parameters.Add("$FilePath", SqliteType.Text);
@@ -104,6 +112,8 @@ namespace PhotoApp2.Services
             var faceCountParam = command.Parameters.Add("$FaceCount", SqliteType.Integer);
             var sceneCategoryParam = command.Parameters.Add("$SceneCategory", SqliteType.Text);
             var isFavoriteParam = command.Parameters.Add("$IsFavorite", SqliteType.Integer);
+            var keywordsParam = command.Parameters.Add("$Keywords", SqliteType.Text);
+            var primaryKindParam = command.Parameters.Add("$PrimaryKind", SqliteType.Text);
 
             foreach (var photo in photos)
             {
@@ -116,6 +126,8 @@ namespace PhotoApp2.Services
                 faceCountParam.Value = photo.FaceCount;
                 sceneCategoryParam.Value = photo.SceneCategory ?? "";
                 isFavoriteParam.Value = photo.IsFavorite ? 1 : 0;
+                keywordsParam.Value = photo.Keywords ?? "";
+                primaryKindParam.Value = photo.PrimaryKind ?? "";
 
                 await command.ExecuteNonQueryAsync();
             }
@@ -146,7 +158,9 @@ namespace PhotoApp2.Services
                     SharpnessScore = reader.GetDouble(6),
                     FaceCount = reader.GetInt32(7),
                     SceneCategory = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                    IsFavorite = reader.GetInt32(9) == 1
+                    IsFavorite = reader.GetInt32(9) == 1,
+                    Keywords = reader.FieldCount > 10 && !reader.IsDBNull(10) ? reader.GetString(10) : "",
+                    PrimaryKind = reader.FieldCount > 11 && !reader.IsDBNull(11) ? reader.GetString(11) : ""
                 });
             }
 

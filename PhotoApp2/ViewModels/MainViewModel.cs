@@ -211,7 +211,8 @@ namespace PhotoApp2.ViewModels
             {
                 await Task.Run(async () =>
                 {
-                    await Parallel.ForEachAsync(chunk, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, async (photo, ct) =>
+                    //await Parallel.ForEachAsync(chunk, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, async (photo, ct) =>
+                    await Parallel.ForEachAsync(chunk, new ParallelOptions { MaxDegreeOfParallelism = 1 }, async (photo, ct) =>
                     {
                         var analyzedPhoto = await _analyzerService.AnalyzePhotoAsync(photo.FilePath);
 
@@ -279,84 +280,12 @@ namespace PhotoApp2.ViewModels
         {
             if (!_allPhotosCache.Any()) return;
 
-            StatusMessage = "Generating album pages...";
-            
-            // 1. Filter out blurry or unanalyzed photos
-            var candidates = _allPhotosCache.Where(p => p.IsAnalyzed && p.SharpnessScore > 100).ToList();
+            var generator = new AlbumGeneratorService();
+            var progress = new Progress<string>(msg => StatusMessage = msg);
 
-            // 2. Sort by date
-            candidates = candidates.OrderBy(p => p.DateTaken).ToList();
+            var pages = await generator.GenerateAlbumAsync(_allPhotosCache, destFolderPath, progress);
 
-            // 3. Simple clustering by time (e.g. gap > 4 hours means new event)
-            var events = new List<List<PhotoItem>>();
-            var currentEvent = new List<PhotoItem>();
-            DateTime lastDate = DateTime.MinValue;
-
-            foreach (var photo in candidates)
-            {
-                if (lastDate == DateTime.MinValue || (photo.DateTaken - lastDate).TotalHours > 4)
-                {
-                    currentEvent = new List<PhotoItem>();
-                    events.Add(currentEvent);
-                }
-                currentEvent.Add(photo);
-                lastDate = photo.DateTaken;
-            }
-
-            // 4. Select top photos per event (target ~400 total)
-            int targetTotal = 400;
-            int selectedTotal = 0;
-            var selectedPhotos = new List<PhotoItem>();
-
-            foreach (var ev in events)
-            {
-                int quota = Math.Max(1, (int)((double)ev.Count / candidates.Count * targetTotal));
-                
-                var bestInEvent = ev.OrderByDescending(p => p.SharpnessScore + (p.FaceCount * 500))
-                                    .Take(quota)
-                                    .OrderBy(p => p.DateTaken) 
-                                    .ToList();
-                
-                selectedPhotos.AddRange(bestInEvent);
-                selectedTotal += bestInEvent.Count;
-            }
-
-            // 5. Group into pages of 3 to 9 photos
-            var pages = new List<List<PhotoItem>>();
-            var currentPage = new List<PhotoItem>();
-            
-            foreach (var photo in selectedPhotos)
-            {
-                currentPage.Add(photo);
-                if (currentPage.Count >= 6)
-                {
-                    pages.Add(currentPage);
-                    currentPage = new List<PhotoItem>();
-                }
-            }
-            if (currentPage.Any()) pages.Add(currentPage);
-
-            // 6. Export the pages to folders
-            int pageIndex = 1;
-            foreach (var page in pages)
-            {
-                var pageFolder = Path.Combine(destFolderPath, $"Page_{pageIndex:D3}");
-                Directory.CreateDirectory(pageFolder);
-                
-                int photoIndex = 1;
-                foreach (var photo in page)
-                {
-                    var destPath = Path.Combine(pageFolder, $"{pageIndex:D3}_{photoIndex:D2}_{photo.FileName}");
-                    if (!File.Exists(destPath))
-                    {
-                        File.Copy(photo.FilePath, destPath);
-                    }
-                    photoIndex++;
-                }
-                pageIndex++;
-            }
-
-            StatusMessage = $"Generated {pages.Count} pages with {selectedPhotos.Count} total photos.";
+            StatusMessage = $"Generated {pages.Count} album pages in {Path.GetFileName(destFolderPath)}.";
         }
     }
 }
