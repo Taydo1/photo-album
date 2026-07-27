@@ -223,199 +223,74 @@ namespace PhotoApp2.Tests
             }
         }
 
-        private class CustomUnpickler : Razorvine.Pickle.Unpickler
-        {
-            protected override object persistentLoad(object pid)
-            {
-                if (pid is object[] arr)
-                {
-                    return new StorageRef { Data = arr };
-                }
-                return pid!;
-            }
-        }
-
-        private class StorageRef
-        {
-            public object[]? Data { get; set; }
-            public override string ToString() => "StorageRef: " + (Data != null ? string.Join(", ", Data.Select(d => d?.ToString())) : "null");
-        }
-
-        private class DummyConstructor : Razorvine.Pickle.IObjectConstructor
-        {
-            public object construct(object[] args)
-            {
-                if (args != null && args.Length == 1 && args[0] is System.Collections.ArrayList al)
-                {
-                    var dict = new System.Collections.Hashtable();
-                    foreach (object item in al)
-                    {
-                        if (item is object[] pair && pair.Length == 2 && pair[0] != null)
-                        {
-                            dict[pair[0]!.ToString()!] = pair[1];
-                        }
-                        else if (item is System.Collections.ArrayList pairList && pairList.Count == 2 && pairList[0] != null)
-                        {
-                            dict[pairList[0]!.ToString()!] = pairList[1];
-                        }
-                    }
-                    if (dict.Count > 0) return dict;
-                }
-                return new TensorRef { Args = args };
-            }
-        }
-
-        private class TensorRef
-        {
-            public object[]? Args { get; set; }
-            public override string ToString() => $"TensorRef ({Args?.Length} args)";
-        }
-
         [Fact]
-        public void Diagnostic_InspectModelLoading()
+        public void MapIndexToTags_CoversAll80Indices_AndReturnsMultipleTags()
         {
-            Razorvine.Pickle.Unpickler.registerConstructor("torch._utils", "_rebuild_tensor", new DummyConstructor());
-            Razorvine.Pickle.Unpickler.registerConstructor("torch._utils", "_rebuild_tensor_v2", new DummyConstructor());
-            Razorvine.Pickle.Unpickler.registerConstructor("torch._utils", "_rebuild_parameter", new DummyConstructor());
-            Razorvine.Pickle.Unpickler.registerConstructor("collections", "OrderedDict", new DummyConstructor());
-
-            var modelPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PhotoApp2", "Models", "resnet18_places365.pth.tar");
-            _output.WriteLine($"Checking model path: {modelPath}, Exists: {File.Exists(modelPath)}");
-            if (File.Exists(modelPath))
-            {
-                var resnet = TorchSharp.torchvision.models.resnet18(num_classes: 365);
-                var modelStateDict = resnet.state_dict();
-
-                using (var fs = File.OpenRead(modelPath))
-                {
-                    var unpickler = new CustomUnpickler();
-                    try
-                    {
-                        var obj1 = unpickler.load(fs);
-                        var obj2 = unpickler.load(fs);
-                        var obj3 = unpickler.load(fs);
-                        var obj4 = unpickler.load(fs);
-                        var storageListObj = unpickler.load(fs);
-
-                        if (obj4 is System.Collections.Hashtable ht4 && ht4.ContainsKey("state_dict") &&
-                            ht4["state_dict"] is System.Collections.Hashtable sdHt &&
-                            storageListObj is System.Collections.ArrayList storages)
-                        {
-                            _output.WriteLine($"Loading {storages.Count} storages...");
-                            var storageMap = new Dictionary<string, float[]>();
-                            using var reader = new BinaryReader(fs);
-                            foreach (object? storageIdObj in storages)
-                            {
-                                if (storageIdObj == null) continue;
-                                string sId = storageIdObj.ToString()!;
-                                long numEl = reader.ReadInt64();
-                                byte[] bytes = reader.ReadBytes((int)(numEl * 4));
-                                float[] floats = new float[numEl];
-                                Buffer.BlockCopy(bytes, 0, floats, 0, bytes.Length);
-                                storageMap[sId] = floats;
-                            }
-
-                            int loadedCount = 0;
-                            using (TorchSharp.torch.no_grad())
-                            {
-                                foreach (object keyObj in sdHt.Keys)
-                                {
-                                    string rawKey = keyObj.ToString()!;
-                                    string cleanKey = rawKey.StartsWith("module.") ? rawKey.Substring(7) : rawKey;
-
-                                    if (sdHt[keyObj] is TensorRef tr && tr.Args != null && tr.Args.Length >= 3)
-                                    {
-                                        if (tr.Args[0] is StorageRef sr && sr.Data != null && sr.Data.Length > 2)
-                                        {
-                                            string storageId = sr.Data[2]?.ToString() ?? "";
-                                            long[] shape = Array.Empty<long>();
-                                            if (tr.Args[2] is System.Collections.ArrayList shapeAl)
-                                            {
-                                                shape = shapeAl.Cast<object>().Select(x => Convert.ToInt64(x)).ToArray();
-                                            }
-                                            else if (tr.Args[2] is object[] shapeArr)
-                                            {
-                                                shape = shapeArr.Select(x => Convert.ToInt64(x)).ToArray();
-                                            }
-
-                                            if (storageMap.TryGetValue(storageId, out var floatData) && modelStateDict.TryGetValue(cleanKey, out var targetTensor))
-                                            {
-                                                using var srcTensor = TorchSharp.torch.tensor(floatData, shape);
-                                                targetTensor.copy_(srcTensor);
-                                                loadedCount++;
-                                            }
-                                            else
-                                            {
-                                                _output.WriteLine($"Missing tensor or storage for {cleanKey}");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _output.WriteLine($"Successfully loaded and copied {loadedCount} / {sdHt.Count} tensors from checkpoint (20 batchnorm num_batches_tracked buffers untouched)!");
-                            Assert.Equal(sdHt.Count, loadedCount);
-                            resnet.eval();
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _output.WriteLine($"Unpickling error: {ex}");
-                        throw;
-                    }
-                }
-            }
-        }
-
-        [Fact]
-        public void MapIndexToPrimaryKind_CoversAll365IndicesWithoutOther()
-        {
-            var mapMethod = typeof(OnnxContentClassifier).GetMethod("MapIndexToPrimaryKind", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var mapMethod = typeof(OnnxContentClassifier).GetMethod("MapIndexToTags", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             Assert.NotNull(mapMethod);
 
-            var validCategories = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            var validPrimaryCategories = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                "Landscape", "Architecture", "Urban & Travel", "Home & Indoors",
-                "Food & Dining", "Leisure & Recreation", "Culture & Education", "Work & Industry"
+                "People & Social", "Landscape", "Architecture", "Urban & Travel",
+                "Home & Indoors", "Food & Dining", "Leisure & Recreation", "Culture & Education",
+                "Work & Industry", "Other"
             };
 
-            for (int i = 0; i < 365; i++)
+            for (int i = 0; i < 80; i++)
             {
-                string? kind = mapMethod.Invoke(null, new object[] { i }) as string;
-                Assert.NotNull(kind);
-                Assert.NotEqual("Other", kind);
-                Assert.Contains(kind, validCategories);
+                var tags = mapMethod.Invoke(null, new object[] { i }) as List<string>;
+                Assert.NotNull(tags);
+                Assert.NotEmpty(tags);
+                // First tag must always represent the overarching primary domain category
+                Assert.Contains(tags[0], validPrimaryCategories);
             }
         }
 
         [Fact]
-        public void ProcessClassificationResults_SumsTagProbabilities_AndOrdersPrimaryTags()
+        public void ProcessClassificationResults_AggregatesMultipleTagsPerCategory()
         {
-            var processMethod = typeof(OnnxContentClassifier).GetMethod("ProcessClassificationResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var processMethod = typeof(OnnxContentClassifier).GetMethods(System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+                .FirstOrDefault(m => m.Name == "ProcessClassificationResults" && m.GetParameters().Length == 2);
             Assert.NotNull(processMethod);
 
-            // Index 8: apartment_building/outdoor -> Architecture
-            // Index 10: aqueduct -> Architecture
-            // Index 30: badlands -> Landscape
-            float[] probs = new float[365];
-            probs[8] = 0.25f;  // Architecture (total = 0.45f)
-            probs[10] = 0.20f; // Architecture
-            probs[30] = 0.30f; // Landscape (total = 0.30f)
+            // Index 0: People & Social, Discussion, Conversation, Socializing, People...
+            // Index 2: Food & Dining, People & Social, Eating, Table, Meal...
+            // Index 25: Landscape, Nature, Scenic...
+            float[] probs = new float[80];
+            probs[0] = 0.85f;  // High probability
+            probs[2] = 0.30f;  // Above 0.20 threshold
+            probs[25] = 0.15f; // Below threshold
 
-            var result = processMethod.Invoke(null, new object[] { probs });
+            var result = processMethod.Invoke(null, new object?[] { probs, null });
             Assert.NotNull(result);
 
             var valueTuple = ((List<string> Tags, double Confidence, float[] FeatureVector))result;
             var tags = valueTuple.Tags;
+            double confidence = valueTuple.Confidence;
 
-            Assert.Equal(2, tags.Count);
-            // Primary tags ranked by total probability: Architecture (0.45) > Landscape (0.30)
-            Assert.Equal("Architecture", tags[0]);
-            Assert.Equal("Landscape", tags[1]);
+            Assert.Equal(0.85, confidence, precision: 2);
+            Assert.True(tags.Count >= 5, "Should aggregate multiple rich tags from all matching categories");
+            Assert.Contains("People & Social", tags);
+            Assert.Contains("Discussion", tags);
+            Assert.Contains("Food & Dining", tags);
+            Assert.Contains("Eating", tags);
+            Assert.DoesNotContain("Landscape", tags);
+        }
 
-            // Raw class keywords must NOT be present
-            Assert.DoesNotContain("badlands", tags);
-            Assert.DoesNotContain("apartment building outdoor", tags);
-            Assert.DoesNotContain("aqueduct", tags);
+        [Fact]
+        public void CosineSimilarity_WorksWithHighDimensional768Vectors()
+        {
+            var rnd = new Random(42);
+            float[] vecA = new float[768];
+            float[] vecB = new float[768];
+            for (int i = 0; i < 768; i++)
+            {
+                vecA[i] = (float)rnd.NextDouble();
+                vecB[i] = vecA[i] * 2.0f; // collinear vector
+            }
+
+            double similarity = OnnxContentClassifier.CalculateCosineSimilarity(vecA, vecB);
+            Assert.Equal(1.0, similarity, precision: 4);
         }
     }
 }
