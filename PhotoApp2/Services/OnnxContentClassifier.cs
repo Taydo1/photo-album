@@ -350,33 +350,46 @@ namespace PhotoApp2.Services
 
             double confidence = Math.Clamp(maxProb, 0.0, 1.0);
 
-            var candidateIndices = new List<int>();
-            for (int i = 0; i < probs.Length; i++)
+            // Sum probability of all classes mapping to the same primary tag
+            var tagProbs = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < probs.Length && i < CategoryPrimaryKinds.Length; i++)
             {
-                if (probs[i] >= 0.15f && (maxProb - probs[i]) <= 0.20f)
+                string tag = CategoryPrimaryKinds[i];
+                if (!string.IsNullOrEmpty(tag) && tag != "Other")
                 {
-                    candidateIndices.Add(i);
+                    if (tagProbs.TryGetValue(tag, out float currentProb))
+                    {
+                        tagProbs[tag] = currentProb + probs[i];
+                    }
+                    else
+                    {
+                        tagProbs[tag] = probs[i];
+                    }
                 }
             }
 
-            if (!candidateIndices.Contains(topIndex))
-            {
-                candidateIndices.Insert(0, topIndex);
-            }
-
             var tagsList = new List<string>();
-            string primaryKind = MapIndexToPrimaryKind(topIndex);
-            if (!string.IsNullOrEmpty(primaryKind) && primaryKind != "Other")
-            {
-                tagsList.Add(primaryKind);
-            }
 
-            foreach (var idx in candidateIndices)
+            // Filter primary kind tags with total probability >= 0.15f, ordered descending by total probability
+            var validTagPairs = tagProbs
+                .Where(kvp => kvp.Value >= 0.15f)
+                .OrderByDescending(kvp => kvp.Value)
+                .ToList();
+
+            if (validTagPairs.Any())
             {
-                string kw = GetCategoryKeyword(idx);
-                if (!string.IsNullOrEmpty(kw) && !tagsList.Contains(kw, StringComparer.OrdinalIgnoreCase))
+                foreach (var pair in validTagPairs)
                 {
-                    tagsList.Add(kw);
+                    tagsList.Add(pair.Key);
+                }
+            }
+            else
+            {
+                // Fallback to top index's primary tag if no tag reached 0.15f
+                string topTag = MapIndexToPrimaryKind(topIndex);
+                if (!string.IsNullOrEmpty(topTag) && topTag != "Other")
+                {
+                    tagsList.Add(topTag);
                 }
             }
 
@@ -388,81 +401,116 @@ namespace PhotoApp2.Services
             return (tagsList, confidence, probs);
         }
 
-        private static string GetCategoryKeyword(int index)
-        {
-            if (index >= 0 && index < Places365Categories.Length)
-            {
-                string raw = Places365Categories[index];
-                int lastSlash = raw.LastIndexOf('/');
-                string clean = lastSlash >= 0 ? raw.Substring(lastSlash + 1) : raw;
-                return clean.Replace("_", " ");
-            }
-            return "scene";
-        }
-
         private static string MapIndexToPrimaryKind(int index)
         {
-            if (index < 0 || index >= Places365Categories.Length)
-                return "Other";
-
-            string category = Places365Categories[index].ToLowerInvariant();
-
-            if (category.Contains("beach") || category.Contains("forest") || category.Contains("mountain") ||
-                category.Contains("valley") || category.Contains("ocean") || category.Contains("desert") ||
-                category.Contains("river") || category.Contains("coast") || category.Contains("canyon") ||
-                category.Contains("glacier") || category.Contains("lake") || category.Contains("field") ||
-                category.Contains("pond") || category.Contains("waterfall") || category.Contains("lagoon") ||
-                category.Contains("swamp") || category.Contains("volcano") || category.Contains("tundra") ||
-                category.Contains("sky") || category.Contains("iceberg"))
+            if (index >= 0 && index < CategoryPrimaryKinds.Length)
             {
-                return "Landscape";
+                return CategoryPrimaryKinds[index];
             }
-
-            if (category.Contains("castle") || category.Contains("temple") || category.Contains("church") ||
-                category.Contains("bridge") || category.Contains("skyscraper") || category.Contains("tower") ||
-                category.Contains("building") || category.Contains("cathedral") || category.Contains("lighthouse") ||
-                category.Contains("ruin") || category.Contains("arch") || category.Contains("palace") ||
-                category.Contains("pagoda") || category.Contains("aqueduct") || category.Contains("monument"))
-            {
-                return "Architecture";
-            }
-
-            if (category.Contains("street") || category.Contains("plaza") || category.Contains("subway") ||
-                category.Contains("highway") || category.Contains("airport") || category.Contains("station") ||
-                category.Contains("promenade") || category.Contains("crosswalk") || category.Contains("downtown") ||
-                category.Contains("boardwalk") || category.Contains("driveway") || category.Contains("alley") ||
-                category.Contains("bazaar") || category.Contains("market"))
-            {
-                return "Urban & Travel";
-            }
-
-            if (category.Contains("living_room") || category.Contains("bedroom") || category.Contains("kitchen") ||
-                category.Contains("patio") || category.Contains("porch") || category.Contains("office") ||
-                category.Contains("dining_room") || category.Contains("bathroom") || category.Contains("corridor") ||
-                category.Contains("attic") || category.Contains("basement") || category.Contains("balcony") ||
-                category.Contains("nursery") || category.Contains("playroom") || category.Contains("house"))
-            {
-                return "Home & Indoors";
-            }
-
-            if (category.Contains("restaurant") || category.Contains("coffee") || category.Contains("bar") ||
-                category.Contains("cafeteria") || category.Contains("picnic") || category.Contains("pub") ||
-                category.Contains("tea") || category.Contains("bakery") || category.Contains("pizzeria") ||
-                category.Contains("diner") || category.Contains("bistro") || category.Contains("food"))
-            {
-                return "Food & Dining";
-            }
-
-            if (category.Contains("playground") || category.Contains("park") || category.Contains("pool") ||
-                category.Contains("stadium") || category.Contains("theater") || category.Contains("campsite") ||
-                category.Contains("amusement") || category.Contains("golf") || category.Contains("ski") ||
-                category.Contains("arcade") || category.Contains("bowling") || category.Contains("gym"))
-            {
-                return "Leisure & Recreation";
-            }
-
             return "Other";
         }
+
+        private static readonly string[] CategoryPrimaryKinds = new string[]
+        {
+            // 0-29
+            "Urban & Travel", "Urban & Travel", "Urban & Travel", "Home & Indoors", "Urban & Travel",
+            "Leisure & Recreation", "Leisure & Recreation", "Leisure & Recreation", "Architecture", "Leisure & Recreation",
+            "Architecture", "Leisure & Recreation", "Architecture", "Architecture", "Culture & Education",
+            "Leisure & Recreation", "Leisure & Recreation", "Leisure & Recreation", "Work & Industry", "Culture & Education",
+            "Culture & Education", "Culture & Education", "Culture & Education", "Work & Industry", "Leisure & Recreation",
+            "Architecture", "Home & Indoors", "Culture & Education", "Work & Industry", "Work & Industry",
+
+            // 30-59
+            "Landscape", "Food & Dining", "Architecture", "Home & Indoors", "Leisure & Recreation",
+            "Leisure & Recreation", "Landscape", "Work & Industry", "Food & Dining", "Food & Dining",
+            "Architecture", "Architecture", "Leisure & Recreation", "Home & Indoors", "Leisure & Recreation",
+            "Home & Indoors", "Urban & Travel", "Urban & Travel", "Landscape", "Architecture",
+            "Work & Industry", "Home & Indoors", "Home & Indoors", "Food & Dining", "Food & Dining",
+            "Urban & Travel", "Work & Industry", "Urban & Travel", "Urban & Travel", "Architecture",
+
+            // 60-89
+            "Culture & Education", "Work & Industry", "Leisure & Recreation", "Home & Indoors", "Leisure & Recreation",
+            "Leisure & Recreation", "Architecture", "Architecture", "Leisure & Recreation", "Architecture",
+            "Urban & Travel", "Urban & Travel", "Food & Dining", "Landscape", "Architecture",
+            "Food & Dining", "Leisure & Recreation", "Culture & Education", "Landscape", "Urban & Travel",
+            "Food & Dining", "Landscape", "Urban & Travel", "Leisure & Recreation", "Architecture",
+            "Architecture", "Architecture", "Architecture", "Work & Industry", "Home & Indoors",
+
+            // 90-119
+            "Architecture", "Architecture", "Culture & Education", "Work & Industry", "Landscape",
+            "Home & Indoors", "Work & Industry", "Landscape", "Urban & Travel", "Food & Dining",
+            "Work & Industry", "Work & Industry", "Work & Industry", "Work & Industry", "Landscape",
+            "Work & Industry", "Home & Indoors", "Architecture", "Culture & Education", "Architecture",
+            "Landscape", "Landscape", "Urban & Travel", "Architecture", "Food & Dining",
+            "Work & Industry", "Landscape", "Landscape", "Landscape", "Food & Dining",
+
+            // 120-149
+            "Food & Dining", "Food & Dining", "Leisure & Recreation", "Architecture", "Home & Indoors",
+            "Urban & Travel", "Home & Indoors", "Urban & Travel", "Work & Industry", "Home & Indoors",
+            "Home & Indoors", "Architecture", "Work & Industry", "Work & Industry", "Home & Indoors",
+            "Urban & Travel", "Work & Industry", "Work & Industry", "Work & Industry", "Food & Dining",
+            "Landscape", "Landscape", "Landscape", "Architecture", "Urban & Travel",
+            "Landscape", "Urban & Travel", "Work & Industry", "Food & Dining", "Leisure & Recreation",
+
+            // 150-179
+            "Landscape", "Landscape", "Landscape", "Leisure & Recreation", "Architecture",
+            "Home & Indoors", "Home & Indoors", "Urban & Travel", "Urban & Travel", "Architecture",
+            "Work & Industry", "Work & Industry", "Work & Industry", "Landscape", "Leisure & Recreation",
+            "Work & Industry", "Work & Industry", "Landscape", "Leisure & Recreation", "Work & Industry",
+            "Work & Industry", "Urban & Travel", "Work & Industry", "Landscape", "Urban & Travel",
+            "Urban & Travel", "Home & Indoors", "Home & Indoors", "Work & Industry", "Home & Indoors",
+
+            // 180-209
+            "Landscape", "Urban & Travel", "Home & Indoors", "Architecture", "Architecture",
+            "Food & Dining", "Landscape", "Landscape", "Leisure & Recreation", "Leisure & Recreation",
+            "Landscape", "Architecture", "Work & Industry", "Urban & Travel", "Landscape",
+            "Home & Indoors", "Work & Industry", "Leisure & Recreation", "Work & Industry", "Work & Industry",
+            "Urban & Travel", "Work & Industry", "Culture & Education", "Home & Indoors", "Landscape",
+            "Landscape", "Work & Industry", "Urban & Travel", "Work & Industry", "Landscape",
+
+            // 210-239
+            "Culture & Education", "Culture & Education", "Culture & Education", "Culture & Education", "Architecture",
+            "Home & Indoors", "Urban & Travel", "Home & Indoors", "Urban & Travel", "Home & Indoors",
+            "Architecture", "Architecture", "Urban & Travel", "Urban & Travel", "Landscape",
+            "Leisure & Recreation", "Architecture", "Urban & Travel", "Architecture", "Landscape",
+            "Architecture", "Urban & Travel", "Landscape", "Landscape", "Landscape",
+            "Leisure & Recreation", "Culture & Education", "Culture & Education", "Leisure & Recreation", "Culture & Education",
+
+            // 240-269
+            "Home & Indoors", "Work & Industry", "Architecture", "Landscape", "Work & Industry",
+            "Work & Industry", "Work & Industry", "Work & Industry", "Work & Industry", "Landscape",
+            "Leisure & Recreation", "Architecture", "Architecture", "Home & Indoors", "Leisure & Recreation",
+            "Urban & Travel", "Urban & Travel", "Urban & Travel", "Landscape", "Home & Indoors",
+            "Architecture", "Work & Industry", "Work & Industry", "Urban & Travel", "Work & Industry",
+            "Food & Dining", "Architecture", "Food & Dining", "Leisure & Recreation", "Home & Indoors",
+
+            // 270-299
+            "Urban & Travel", "Landscape", "Home & Indoors", "Urban & Travel", "Food & Dining",
+            "Leisure & Recreation", "Leisure & Recreation", "Leisure & Recreation", "Urban & Travel", "Landscape",
+            "Home & Indoors", "Home & Indoors", "Work & Industry", "Urban & Travel", "Food & Dining",
+            "Food & Dining", "Food & Dining", "Landscape", "Landscape", "Landscape",
+            "Architecture", "Architecture", "Architecture", "Urban & Travel", "Leisure & Recreation",
+            "Work & Industry", "Culture & Education", "Culture & Education", "Work & Industry", "Architecture",
+
+            // 300-329
+            "Work & Industry", "Work & Industry", "Work & Industry", "Home & Indoors", "Leisure & Recreation",
+            "Leisure & Recreation", "Landscape", "Architecture", "Urban & Travel", "Landscape",
+            "Leisure & Recreation", "Work & Industry", "Leisure & Recreation", "Leisure & Recreation", "Leisure & Recreation",
+            "Leisure & Recreation", "Leisure & Recreation", "Architecture", "Home & Indoors", "Urban & Travel",
+            "Urban & Travel", "Work & Industry", "Food & Dining", "Landscape", "Landscape",
+            "Leisure & Recreation", "Leisure & Recreation", "Architecture", "Home & Indoors", "Work & Industry",
+
+            // 330-359
+            "Architecture", "Architecture", "Urban & Travel", "Leisure & Recreation", "Architecture",
+            "Work & Industry", "Urban & Travel", "Urban & Travel", "Landscape", "Architecture",
+            "Landscape", "Landscape", "Landscape", "Home & Indoors", "Landscape",
+            "Landscape", "Work & Industry", "Architecture", "Urban & Travel", "Landscape",
+            "Landscape", "Leisure & Recreation", "Home & Indoors", "Leisure & Recreation", "Architecture",
+            "Landscape", "Landscape", "Landscape", "Food & Dining", "Landscape",
+
+            // 360-364
+            "Work & Industry", "Architecture", "Home & Indoors", "Urban & Travel", "Leisure & Recreation"
+        };
 
         public void Dispose()
         {

@@ -365,5 +365,57 @@ namespace PhotoApp2.Tests
                 }
             }
         }
+
+        [Fact]
+        public void MapIndexToPrimaryKind_CoversAll365IndicesWithoutOther()
+        {
+            var mapMethod = typeof(OnnxContentClassifier).GetMethod("MapIndexToPrimaryKind", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(mapMethod);
+
+            var validCategories = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Landscape", "Architecture", "Urban & Travel", "Home & Indoors",
+                "Food & Dining", "Leisure & Recreation", "Culture & Education", "Work & Industry"
+            };
+
+            for (int i = 0; i < 365; i++)
+            {
+                string? kind = mapMethod.Invoke(null, new object[] { i }) as string;
+                Assert.NotNull(kind);
+                Assert.NotEqual("Other", kind);
+                Assert.Contains(kind, validCategories);
+            }
+        }
+
+        [Fact]
+        public void ProcessClassificationResults_SumsTagProbabilities_AndOrdersPrimaryTags()
+        {
+            var processMethod = typeof(OnnxContentClassifier).GetMethod("ProcessClassificationResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(processMethod);
+
+            // Index 8: apartment_building/outdoor -> Architecture
+            // Index 10: aqueduct -> Architecture
+            // Index 30: badlands -> Landscape
+            float[] probs = new float[365];
+            probs[8] = 0.25f;  // Architecture (total = 0.45f)
+            probs[10] = 0.20f; // Architecture
+            probs[30] = 0.30f; // Landscape (total = 0.30f)
+
+            var result = processMethod.Invoke(null, new object[] { probs });
+            Assert.NotNull(result);
+
+            var valueTuple = ((List<string> Tags, double Confidence, float[] FeatureVector))result;
+            var tags = valueTuple.Tags;
+
+            Assert.Equal(2, tags.Count);
+            // Primary tags ranked by total probability: Architecture (0.45) > Landscape (0.30)
+            Assert.Equal("Architecture", tags[0]);
+            Assert.Equal("Landscape", tags[1]);
+
+            // Raw class keywords must NOT be present
+            Assert.DoesNotContain("badlands", tags);
+            Assert.DoesNotContain("apartment building outdoor", tags);
+            Assert.DoesNotContain("aqueduct", tags);
+        }
     }
 }
