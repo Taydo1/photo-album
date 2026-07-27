@@ -180,7 +180,7 @@ namespace PhotoApp2.ViewModels
             if (SelectedFolderNode == null) return;
 
             IsAnalyzing = true;
-            var toAnalyze = Photos.Where(p => !p.IsAnalyzed).ToList();
+            var toAnalyze = Photos.Where(p => !p.IsAnalyzed || p.Tags == null || !p.Tags.Any()).ToList();
             
             TotalPhotos = toAnalyze.Count;
             AnalyzedPhotos = 0;
@@ -211,10 +211,9 @@ namespace PhotoApp2.ViewModels
             {
                 await Task.Run(async () =>
                 {
-                    //await Parallel.ForEachAsync(chunk, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, async (photo, ct) =>
-                    await Parallel.ForEachAsync(chunk, new ParallelOptions { MaxDegreeOfParallelism = 1 }, async (photo, ct) =>
+                    await Parallel.ForEachAsync(chunk, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, async (photo, ct) =>
                     {
-                        var analyzedPhoto = await _analyzerService.AnalyzePhotoAsync(photo.FilePath);
+                        var analyzedPhoto = await _analyzerService.AnalyzePhotoAsync(photo);
 
                         // Copy values
                         photo.IsAnalyzed = true;
@@ -241,6 +240,23 @@ namespace PhotoApp2.ViewModels
             StatusMessage = $"Analyzed {TotalPhotos} photos.";
             IsAnalyzing = false;
             ApplyFilters(); // Refresh display
+        }
+
+        [RelayCommand]
+        private async Task ClearAllTagsAsync()
+        {
+            if (Photos == null || !Photos.Any()) return;
+
+            StatusMessage = "Clearing tags for all photos...";
+            foreach (var photo in Photos)
+            {
+                photo.Tags = new List<string>();
+                photo.IsAnalyzed = false;
+            }
+
+            await _dbService.SavePhotosAsync(Photos);
+            StatusMessage = $"Cleared tags for {Photos.Count} photos. Click 'Analyze Photos' to re-tag.";
+            ApplyFilters();
         }
 
         [RelayCommand]

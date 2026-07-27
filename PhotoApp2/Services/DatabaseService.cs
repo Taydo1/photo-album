@@ -3,6 +3,7 @@ using PhotoApp2.Models;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -41,22 +42,11 @@ namespace PhotoApp2.Services
                     IsFavorite INTEGER NOT NULL DEFAULT 0,
                     Keywords TEXT NOT NULL DEFAULT '',
                     PrimaryKind TEXT NOT NULL DEFAULT '',
-                    Tags TEXT NOT NULL DEFAULT ''
+                    Tags TEXT NOT NULL DEFAULT '',
+                    FeatureVector TEXT NOT NULL DEFAULT ''
                 );
             ";
             await command.ExecuteNonQueryAsync();
-
-            // Try adding Tags column if migrating existing database
-            try
-            {
-                var alterCmd = connection.CreateCommand();
-                alterCmd.CommandText = "ALTER TABLE Photos ADD COLUMN Tags TEXT NOT NULL DEFAULT '';";
-                await alterCmd.ExecuteNonQueryAsync();
-            }
-            catch
-            {
-                // Column already exists
-            }
         }
 
         public async Task SavePhotoAsync(PhotoItem photo)
@@ -66,15 +56,20 @@ namespace PhotoApp2.Services
 
             var command = connection.CreateCommand();
             command.CommandText = @"
-                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, IsFavorite, Tags)
-                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $IsFavorite, $Tags)
+                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, IsFavorite, Tags, FeatureVector)
+                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $IsFavorite, $Tags, $FeatureVector)
                 ON CONFLICT(FilePath) DO UPDATE SET
                     IsAnalyzed = excluded.IsAnalyzed,
                     SharpnessScore = excluded.SharpnessScore,
                     FaceCount = excluded.FaceCount,
                     IsFavorite = excluded.IsFavorite,
-                    Tags = excluded.Tags;
+                    Tags = excluded.Tags,
+                    FeatureVector = excluded.FeatureVector;
             ";
+
+            string vecStr = photo.VisualFeatureVector != null && photo.VisualFeatureVector.Length > 0
+                ? string.Join(",", photo.VisualFeatureVector.Select(f => f.ToString(CultureInfo.InvariantCulture)))
+                : "";
 
             command.Parameters.AddWithValue("$FilePath", photo.FilePath);
             command.Parameters.AddWithValue("$FileName", photo.FileName);
@@ -85,6 +80,7 @@ namespace PhotoApp2.Services
             command.Parameters.AddWithValue("$FaceCount", photo.FaceCount);
             command.Parameters.AddWithValue("$IsFavorite", photo.IsFavorite ? 1 : 0);
             command.Parameters.AddWithValue("$Tags", string.Join(", ", photo.Tags ?? new List<string>()));
+            command.Parameters.AddWithValue("$FeatureVector", vecStr);
 
             await command.ExecuteNonQueryAsync();
         }
@@ -100,14 +96,15 @@ namespace PhotoApp2.Services
             var command = connection.CreateCommand();
             command.Transaction = transaction;
             command.CommandText = @"
-                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, IsFavorite, Tags)
-                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $IsFavorite, $Tags)
+                INSERT INTO Photos (FilePath, FileName, DateTaken, FileSizeBytes, IsAnalyzed, SharpnessScore, FaceCount, IsFavorite, Tags, FeatureVector)
+                VALUES ($FilePath, $FileName, $DateTaken, $FileSizeBytes, $IsAnalyzed, $SharpnessScore, $FaceCount, $IsFavorite, $Tags, $FeatureVector)
                 ON CONFLICT(FilePath) DO UPDATE SET
                     IsAnalyzed = excluded.IsAnalyzed,
                     SharpnessScore = excluded.SharpnessScore,
                     FaceCount = excluded.FaceCount,
                     IsFavorite = excluded.IsFavorite,
-                    Tags = excluded.Tags;
+                    Tags = excluded.Tags,
+                    FeatureVector = excluded.FeatureVector;
             ";
 
             var filePathParam = command.Parameters.Add("$FilePath", SqliteType.Text);
@@ -119,9 +116,14 @@ namespace PhotoApp2.Services
             var faceCountParam = command.Parameters.Add("$FaceCount", SqliteType.Integer);
             var isFavoriteParam = command.Parameters.Add("$IsFavorite", SqliteType.Integer);
             var tagsParam = command.Parameters.Add("$Tags", SqliteType.Text);
+            var featureVectorParam = command.Parameters.Add("$FeatureVector", SqliteType.Text);
 
             foreach (var photo in photos)
             {
+                string vecStr = photo.VisualFeatureVector != null && photo.VisualFeatureVector.Length > 0
+                    ? string.Join(",", photo.VisualFeatureVector.Select(f => f.ToString(CultureInfo.InvariantCulture)))
+                    : "";
+
                 filePathParam.Value = photo.FilePath;
                 fileNameParam.Value = photo.FileName;
                 dateTakenParam.Value = photo.DateTaken.ToString("o");
@@ -131,6 +133,7 @@ namespace PhotoApp2.Services
                 faceCountParam.Value = photo.FaceCount;
                 isFavoriteParam.Value = photo.IsFavorite ? 1 : 0;
                 tagsParam.Value = string.Join(", ", photo.Tags ?? new List<string>());
+                featureVectorParam.Value = vecStr;
 
                 await command.ExecuteNonQueryAsync();
             }
@@ -151,7 +154,6 @@ namespace PhotoApp2.Services
             while (await reader.ReadAsync())
             {
                 string rawTags = "";
-                // If Tags column (col 12) exists
                 if (reader.FieldCount > 12 && !reader.IsDBNull(12))
                 {
                     rawTags = reader.GetString(12);
@@ -165,6 +167,22 @@ namespace PhotoApp2.Services
                     ? new List<string>()
                     : rawTags.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
+                float[]? vec = null;
+                if (reader.FieldCount > 13 && !reader.IsDBNull(13))
+                {
+                    string rawVec = reader.GetString(13);
+                    if (!string.IsNullOrWhiteSpace(rawVec))
+                    {
+                        try
+                        {
+                            vec = rawVec.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                        .Select(s => float.Parse(s, CultureInfo.InvariantCulture))
+                                        .ToArray();
+                        }
+                        catch { }
+                    }
+                }
+
                 photos.Add(new PhotoItem
                 {
                     Id = reader.GetInt32(0),
@@ -176,7 +194,8 @@ namespace PhotoApp2.Services
                     SharpnessScore = reader.GetDouble(6),
                     FaceCount = reader.GetInt32(7),
                     IsFavorite = reader.GetInt32(9) == 1,
-                    Tags = tagsList
+                    Tags = tagsList,
+                    VisualFeatureVector = vec
                 });
             }
 

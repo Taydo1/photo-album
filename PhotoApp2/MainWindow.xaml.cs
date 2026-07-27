@@ -49,6 +49,11 @@ namespace PhotoApp2
             ViewModel.AnalyzePhotosCommand.Execute(null);
         }
 
+        private void ClearTags_Click(object sender, RoutedEventArgs e)
+        {
+            ViewModel.ClearAllTagsCommand.Execute(null);
+        }
+
         private async void AutoGenerateAlbum_Click(object sender, RoutedEventArgs e)
         {
             var hwnd = WindowNative.GetWindowHandle(this);

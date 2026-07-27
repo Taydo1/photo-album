@@ -20,6 +20,7 @@
         <CommandBar DefaultLabelPosition="Right" VerticalAlignment="Top">
             <AppBarButton Icon="Folder" Label="Open Folder" Click="OpenFolder_Click"/>
             <AppBarButton Icon="Find" Label="Analyze Photos" Click="AnalyzePhotos_Click"/>
+            <AppBarButton Icon="Clear" Label="Clear Tags" Click="ClearTags_Click"/>
             <AppBarButton Icon="Save" Label="Export Favorites" Click="ExportFavorites_Click"/>
             <AppBarButton Icon="Pictures" Label="Auto-Generate Album" Click="AutoGenerateAlbum_Click"/>
             <AppBarToggleButton Icon="DockLeft" Label="Toggle Gallery" IsChecked="{x:Bind ViewModel.IsGalleryVisible, Mode=TwoWay}"/>

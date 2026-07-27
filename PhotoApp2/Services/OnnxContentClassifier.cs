@@ -68,7 +68,6 @@ namespace PhotoApp2.Services
                     string jsonPath = Path.Combine(baseDir, "Assets", "Models", "siglip_categories.json");
                     if (!File.Exists(jsonPath))
                     {
-                        // Fallback resolution for test runners or alternative working directories
                         string altPath = Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "PhotoApp2", "Assets", "Models", "siglip_categories.json"));
                         if (File.Exists(altPath)) jsonPath = altPath;
                         else
@@ -110,7 +109,6 @@ namespace PhotoApp2.Services
                     var appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PhotoApp2", "Models");
                     Directory.CreateDirectory(appDataDir);
 
-                    // 1. Load precomputed SigLIP text category embeddings from our authoritative asset
                     string jsonPath = Path.Combine(baseDir, "Assets", "Models", "siglip_categories.json");
                     if (!File.Exists(jsonPath))
                     {
@@ -138,7 +136,6 @@ namespace PhotoApp2.Services
                         _modelData = CreateFallbackModelData();
                     }
 
-                    // 2. Locate or download SigLIP vision ONNX model
                     string? rawModelPath = modelPath;
                     if (string.IsNullOrEmpty(rawModelPath))
                     {
@@ -178,7 +175,6 @@ namespace PhotoApp2.Services
                         return;
                     }
 
-                    // 3. Initialize ONNX Runtime InferenceSession with DirectML hardware GPU acceleration
                     using var sessionOptions = new SessionOptions();
                     try
                     {
@@ -210,7 +206,6 @@ namespace PhotoApp2.Services
                 catch (Exception ex)
                 {
                     Debug.WriteLine($"Error initializing OnnxContentClassifier: {ex.Message}");
-                    Console.WriteLine($"Error initializing OnnxContentClassifier: {ex.Message}");
                 }
             });
         }
@@ -246,8 +241,6 @@ namespace PhotoApp2.Services
                     resized.CopyTo(rgb);
                 }
 
-                // Prepare SigLIP normalized input float array [1, 3, 224, 224]
-                // SigLIP uses Mean (0.5, 0.5, 0.5) and Std (0.5, 0.5, 0.5) -> (val / 127.5f) - 1.0f
                 var inputTensor = new DenseTensor<float>(new[] { 1, 3, _inputHeight, _inputWidth });
 
                 unsafe
@@ -261,9 +254,9 @@ namespace PhotoApp2.Services
                         for (int x = 0; x < _inputWidth; x++)
                         {
                             int idx = x * 3;
-                            inputTensor[0, 0, y, x] = ((row[idx] / 127.5f) - 1.0f);     // R
-                            inputTensor[0, 1, y, x] = ((row[idx + 1] / 127.5f) - 1.0f); // G
-                            inputTensor[0, 2, y, x] = ((row[idx + 2] / 127.5f) - 1.0f); // B
+                            inputTensor[0, 0, y, x] = ((row[idx] / 127.5f) - 1.0f);
+                            inputTensor[0, 1, y, x] = ((row[idx + 1] / 127.5f) - 1.0f);
+                            inputTensor[0, 2, y, x] = ((row[idx + 2] / 127.5f) - 1.0f);
                         }
                     }
                 }
@@ -315,6 +308,19 @@ namespace PhotoApp2.Services
                 Debug.WriteLine($"Error during SigLIP ONNX scene classification: {ex.Message}");
                 return (new List<string> { "Other" }, 0.0, Array.Empty<float>());
             }
+        }
+
+        public (List<string> Tags, double Confidence, float[] FeatureVector) ClassifyFromEmbedding(float[] visionEmbed)
+        {
+            var categories = GetOrLoadCategories();
+            if (categories == null || categories.Count == 0 || visionEmbed == null || visionEmbed.Length == 0)
+                return (new List<string> { "Other" }, 0.0, visionEmbed ?? Array.Empty<float>());
+
+            var dummyModelData = _modelData ?? new SiglipModelData { Categories = categories };
+            float[] normalizedEmbed = NormalizeVector(visionEmbed);
+            float[] probs = CalculateSigmoidProbabilities(normalizedEmbed, dummyModelData);
+
+            return ProcessClassificationResults(probs, normalizedEmbed);
         }
 
         private static float[] NormalizeVector(float[] vector)
@@ -399,7 +405,6 @@ namespace PhotoApp2.Services
 
             double confidence = Math.Clamp(maxProb, 0.0, 1.0);
 
-            // Because SigLIP evaluates each category independently via Sigmoid loss, aggregate all tags from categories scoring above threshold
             var tagScores = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < probs.Length && i < categories.Count; i++)
             {
@@ -427,7 +432,6 @@ namespace PhotoApp2.Services
 
             var tagsList = new List<string>();
 
-            // Filter tags with aggregated probability >= 0.20f, ordered descending by probability
             var validTagPairs = tagScores
                 .Where(kvp => kvp.Value >= 0.20f)
                 .OrderByDescending(kvp => kvp.Value)
@@ -442,7 +446,6 @@ namespace PhotoApp2.Services
             }
             else
             {
-                // Fallback to top index's tags if no category reached threshold
                 var topTags = MapIndexToTags(topIndex);
                 if (topTags != null)
                 {
@@ -454,12 +457,46 @@ namespace PhotoApp2.Services
                 }
             }
 
+            // Remove tags that are too close in meaning
+            tagsList = FilterRedundantSynonyms(tagsList);
+
             if (!tagsList.Any())
             {
                 tagsList.Add("Other");
             }
 
             return (tagsList, confidence, featureVector ?? probs);
+        }
+
+        private static List<string> FilterRedundantSynonyms(List<string> tags)
+        {
+            if (tags == null || tags.Count <= 1) return tags ?? new List<string>();
+
+            var result = new List<string>(tags);
+
+            var synonymsToFilter = new (string Keep, string Remove)[]
+            {
+                ("Document", "Paper"),
+                ("Screenshot", "Screen"),
+                ("Running", "Jogging"),
+                ("Children", "Kids"),
+                ("Beach", "Seaside"),
+                ("Snow", "Snowy landscape"),
+                ("Dog", "Puppy"),
+                ("Cat", "Kitten"),
+                ("People & Social", "Social"),
+                ("Computer & Tech", "Tech")
+            };
+
+            foreach (var (keep, remove) in synonymsToFilter)
+            {
+                if (result.Contains(keep, StringComparer.OrdinalIgnoreCase) && result.Contains(remove, StringComparer.OrdinalIgnoreCase))
+                {
+                    result.RemoveAll(t => string.Equals(t, remove, StringComparison.OrdinalIgnoreCase));
+                }
+            }
+
+            return result;
         }
 
         private static List<string> MapIndexToTags(int index)

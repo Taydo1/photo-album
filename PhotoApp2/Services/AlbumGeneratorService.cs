@@ -20,13 +20,26 @@ namespace PhotoApp2.Services
 
     public class AlbumGeneratorService
     {
+        private static readonly HashSet<string> ExcludedAlbumTags = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "Screenshot", "Computer & Tech", "Screen", "Monitor",
+            "Document", "Paper", "Letter", "Text", "Document Photo",
+            "Uninteresting", "Blurry", "Low Quality", "Empty"
+        };
+
+        public static bool HasExcludedAlbumTag(PhotoItem photo)
+        {
+            if (photo.Tags == null || !photo.Tags.Any()) return false;
+            return photo.Tags.Any(tag => ExcludedAlbumTags.Contains(tag));
+        }
+
         public Task<List<AlbumPage>> GenerateAlbumAsync(IEnumerable<PhotoItem> allPhotos, string destFolderPath, IProgress<string>? progress = null)
         {
             return Task.Run(() =>
             {
                 progress?.Report("Filtering and clustering photos by holiday trips and events...");
 
-                var candidates = allPhotos.Where(p => (p.IsAnalyzed && p.SharpnessScore > 50) || p.IsFavorite)
+                var candidates = allPhotos.Where(p => ((p.IsAnalyzed && p.SharpnessScore > 50) || p.IsFavorite) && !HasExcludedAlbumTag(p))
                                           .OrderBy(p => p.DateTaken)
                                           .ToList();
 

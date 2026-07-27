@@ -224,7 +224,39 @@ namespace PhotoApp2.Tests
         }
 
         [Fact]
-        public void MapIndexToTags_CoversAll80Indices_AndReturnsMultipleTags()
+        public async Task AlbumGeneratorService_ExcludesUtilityAndUninterestingTags()
+        {
+            var generator = new AlbumGeneratorService();
+            var tempDir = Path.Combine(Path.GetTempPath(), "PhotoApp2_TestExclusion_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            try
+            {
+                var simPhotos = new List<Models.PhotoItem>
+                {
+                    new Models.PhotoItem { Id = 1, FilePath = "fake1.jpg", FileName = "fake1.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = DateTime.Today.AddHours(1), Tags = new List<string> { "Landscape" }, VisualFeatureVector = new float[] { 1f, 0f, 0f } },
+                    new Models.PhotoItem { Id = 2, FilePath = "fake2.jpg", FileName = "fake2.jpg", IsAnalyzed = true, SharpnessScore = 120, DateTaken = DateTime.Today.AddHours(2), Tags = new List<string> { "Screenshot", "Computer & Tech" }, VisualFeatureVector = new float[] { 0f, 1f, 0f } },
+                    new Models.PhotoItem { Id = 3, FilePath = "fake3.jpg", FileName = "fake3.jpg", IsAnalyzed = true, SharpnessScore = 110, DateTaken = DateTime.Today.AddHours(3), Tags = new List<string> { "Document", "Paper" }, VisualFeatureVector = new float[] { 0f, 0f, 1f } },
+                    new Models.PhotoItem { Id = 4, FilePath = "fake4.jpg", FileName = "fake4.jpg", IsAnalyzed = true, SharpnessScore = 105, DateTaken = DateTime.Today.AddHours(4), Tags = new List<string> { "Uninteresting", "Blurry" }, VisualFeatureVector = new float[] { 0.5f, 0.5f, 0f } }
+                };
+
+                var pages = await generator.GenerateAlbumAsync(simPhotos, tempDir);
+
+                // Only fake1.jpg (Landscape) should be included in the album pages
+                var albumPhotoIds = pages.SelectMany(p => p.Photos).Select(p => p.Id).ToList();
+                Assert.Contains(1, albumPhotoIds);
+                Assert.DoesNotContain(2, albumPhotoIds);
+                Assert.DoesNotContain(3, albumPhotoIds);
+                Assert.DoesNotContain(4, albumPhotoIds);
+            }
+            finally
+            {
+                if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+            }
+        }
+
+        [Fact]
+        public void MapIndexToTags_CoversAll83Indices_AndReturnsMultipleTags()
         {
             var mapMethod = typeof(OnnxContentClassifier).GetMethod("MapIndexToTags", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             Assert.NotNull(mapMethod);
@@ -233,15 +265,14 @@ namespace PhotoApp2.Tests
             {
                 "People & Social", "Landscape", "Architecture", "Urban & Travel",
                 "Home & Indoors", "Food & Dining", "Leisure & Recreation", "Culture & Education",
-                "Work & Industry", "Other"
+                "Work & Industry", "Computer & Tech", "Document", "Uninteresting", "Other"
             };
 
-            for (int i = 0; i < 80; i++)
+            for (int i = 0; i < 83; i++)
             {
                 var tags = mapMethod.Invoke(null, new object[] { i }) as List<string>;
                 Assert.NotNull(tags);
                 Assert.NotEmpty(tags);
-                // First tag must always represent the overarching primary domain category
                 Assert.Contains(tags[0], validPrimaryCategories);
             }
         }
@@ -253,10 +284,7 @@ namespace PhotoApp2.Tests
                 .FirstOrDefault(m => m.Name == "ProcessClassificationResults" && m.GetParameters().Length == 2);
             Assert.NotNull(processMethod);
 
-            // Index 0: People & Social, Discussion, Conversation, Socializing, People...
-            // Index 2: Food & Dining, People & Social, Eating, Table, Meal...
-            // Index 25: Landscape, Nature, Scenic...
-            float[] probs = new float[80];
+            float[] probs = new float[83];
             probs[0] = 0.85f;  // High probability
             probs[2] = 0.30f;  // Above 0.20 threshold
             probs[25] = 0.15f; // Below threshold
@@ -269,12 +297,61 @@ namespace PhotoApp2.Tests
             double confidence = valueTuple.Confidence;
 
             Assert.Equal(0.85, confidence, precision: 2);
-            Assert.True(tags.Count >= 5, "Should aggregate multiple rich tags from all matching categories");
+            Assert.True(tags.Count >= 3, "Should aggregate multiple rich tags from all matching categories");
             Assert.Contains("People & Social", tags);
             Assert.Contains("Discussion", tags);
             Assert.Contains("Food & Dining", tags);
-            Assert.Contains("Eating", tags);
             Assert.DoesNotContain("Landscape", tags);
+        }
+
+        [Fact]
+        public void FilterRedundantSynonyms_RemovesCloseMeaningTags()
+        {
+            var filterMethod = typeof(OnnxContentClassifier).GetMethod("FilterRedundantSynonyms", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Assert.NotNull(filterMethod);
+
+            var rawTags = new List<string> { "Document", "Paper", "Screenshot", "Screen", "Running", "Jogging" };
+            var cleanedTags = filterMethod.Invoke(null, new object[] { rawTags }) as List<string>;
+
+            Assert.NotNull(cleanedTags);
+            Assert.Contains("Document", cleanedTags);
+            Assert.DoesNotContain("Paper", cleanedTags);
+            Assert.Contains("Screenshot", cleanedTags);
+            Assert.DoesNotContain("Screen", cleanedTags);
+            Assert.Contains("Running", cleanedTags);
+            Assert.DoesNotContain("Jogging", cleanedTags);
+        }
+
+        [Fact]
+        public async Task AnalyzePhotoAsync_ReusesExistingEmbedding_AndSkipsExistingTags()
+        {
+            var service = new PhotoAnalyzerService();
+            await service.InitializeAsync();
+
+            // Photo with pre-existing tags -> should skip computation entirely
+            var photoWithTags = new Models.PhotoItem
+            {
+                FilePath = "fake_path.jpg",
+                Tags = new List<string> { "ExistingTag" },
+                VisualFeatureVector = new float[768]
+            };
+
+            var result1 = await service.AnalyzePhotoAsync(photoWithTags);
+            Assert.Single(result1.Tags);
+            Assert.Equal("ExistingTag", result1.Tags[0]);
+
+            // Photo with precomputed embedding but no tags -> should reuse embedding and generate tags instantly
+            var photoWithEmbedOnly = new Models.PhotoItem
+            {
+                FilePath = "fake_path2.jpg",
+                Tags = new List<string>(),
+                VisualFeatureVector = new float[768]
+            };
+
+            var result2 = await service.AnalyzePhotoAsync(photoWithEmbedOnly);
+            Assert.NotNull(result2.Tags);
+            Assert.NotEmpty(result2.Tags);
+            Assert.True(result2.IsAnalyzed);
         }
 
         [Fact]

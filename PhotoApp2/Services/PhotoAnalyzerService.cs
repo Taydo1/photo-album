@@ -44,6 +44,44 @@ namespace PhotoApp2.Services
             }
         }
 
+        public Task<PhotoItem> AnalyzePhotoAsync(PhotoItem photo)
+        {
+            return Task.Run(() =>
+            {
+                if (photo == null) return photo!;
+
+                // 1. If tags already exist on the photo, skip tag computation completely
+                if (photo.Tags != null && photo.Tags.Any())
+                {
+                    photo.IsAnalyzed = true;
+                    return photo;
+                }
+
+                // 2. If feature vector already exists, reuse it without re-running ONNX vision model
+                if (photo.VisualFeatureVector != null && photo.VisualFeatureVector.Length > 0 && _contentClassifier != null)
+                {
+                    var res = _contentClassifier.ClassifyFromEmbedding(photo.VisualFeatureVector);
+                    var finalTags = new List<string>(res.Tags ?? new List<string>());
+                    if (photo.FaceCount > 0 && !finalTags.Contains("Person", StringComparer.OrdinalIgnoreCase))
+                    {
+                        finalTags.Insert(0, "Person");
+                    }
+                    photo.Tags = finalTags;
+                    photo.IsAnalyzed = true;
+                    return photo;
+                }
+
+                // 3. Fallback to full visual analysis from file path
+                var fullAnalyzed = AnalyzePhotoAsync(photo.FilePath).Result;
+                photo.SharpnessScore = fullAnalyzed.SharpnessScore;
+                photo.FaceCount = fullAnalyzed.FaceCount;
+                photo.Tags = fullAnalyzed.Tags;
+                photo.VisualFeatureVector = fullAnalyzed.VisualFeatureVector;
+                photo.IsAnalyzed = true;
+                return photo;
+            });
+        }
+
         public Task<PhotoItem> AnalyzePhotoAsync(string filePath)
         {
             return Task.Run(() =>
