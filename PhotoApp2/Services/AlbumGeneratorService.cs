@@ -20,15 +20,12 @@ namespace PhotoApp2.Services
 
     public class AlbumGeneratorService
     {
-        private readonly Random _rand = new();
-
         public Task<List<AlbumPage>> GenerateAlbumAsync(IEnumerable<PhotoItem> allPhotos, string destFolderPath, IProgress<string>? progress = null)
         {
             return Task.Run(() =>
             {
                 progress?.Report("Filtering and clustering photos by holiday trips and events...");
 
-                // 1. Filter out unanalyzed or blurry photos (unless marked as Favorite)
                 var candidates = allPhotos.Where(p => (p.IsAnalyzed && p.SharpnessScore > 50) || p.IsFavorite)
                                           .OrderBy(p => p.DateTaken)
                                           .ToList();
@@ -36,45 +33,56 @@ namespace PhotoApp2.Services
                 if (!candidates.Any())
                     return new List<AlbumPage>();
 
-                // 2. Chronological Episode Clustering (Same day / week or holidays)
-                // A gap of > 48 hours indicates a distinct event or trip episode
                 var episodes = new List<List<PhotoItem>>();
                 var currentEpisode = new List<PhotoItem>();
-                DateTime lastDate = DateTime.MinValue;
+                PhotoItem? lastPhoto = null;
 
                 foreach (var photo in candidates)
                 {
-                    if (lastDate != DateTime.MinValue && (photo.DateTaken - lastDate).TotalHours > 48)
+                    bool isNewEpisode = false;
+                    if (lastPhoto != null)
                     {
-                        if (currentEpisode.Any()) episodes.Add(currentEpisode);
+                        if ((photo.DateTaken - lastPhoto.DateTaken).TotalHours > 6 || photo.DateTaken.Date != lastPhoto.DateTaken.Date)
+                        {
+                            isNewEpisode = true;
+                        }
+                        else if (photo.VisualFeatureVector != null && lastPhoto.VisualFeatureVector != null)
+                        {
+                            double sim = OnnxContentClassifier.CalculateCosineSimilarity(photo.VisualFeatureVector, lastPhoto.VisualFeatureVector);
+                            if (sim < 0.45)
+                            {
+                                isNewEpisode = true;
+                            }
+                        }
+                    }
+
+                    if (isNewEpisode && currentEpisode.Any())
+                    {
+                        episodes.Add(currentEpisode);
                         currentEpisode = new List<PhotoItem>();
                     }
+
                     currentEpisode.Add(photo);
-                    lastDate = photo.DateTaken;
+                    lastPhoto = photo;
                 }
                 if (currentEpisode.Any()) episodes.Add(currentEpisode);
 
-                progress?.Report($"Identified {episodes.Count} chronological episodes. Selecting best photos and removing rapid bursts...");
+                progress?.Report($"Identified {episodes.Count} chronological & visual episodes. Selecting best photos and deduplicating bursts...");
 
-                // 3. Quality scoring & rapid burst deduplication (within 15-second rolling window)
                 var curatedPhotosByEpisode = new List<List<PhotoItem>>();
                 foreach (var episode in episodes)
                 {
                     var deduplicated = DeduplicateBursts(episode, 15.0);
-
-                    // Sort by composite score to select top quality shots per episode
                     var scored = deduplicated.OrderByDescending(CalculatePhotoScore).ToList();
 
-                    // If episode has many photos, take top shots (max ~100 per episode) while keeping diversity
                     int quota = Math.Min(scored.Count, Math.Max(10, scored.Count * 8 / 10));
                     var selected = scored.Take(quota).OrderBy(p => p.DateTaken).ToList();
 
                     if (selected.Any()) curatedPhotosByEpisode.Add(selected);
                 }
 
-                progress?.Report("Creating thematic pages (between 2 and 9 photos per page, max 1-2 photo kinds)...");
+                progress?.Report("Creating rhythm-based thematic pages with visual synergy layout composition...");
 
-                // 4. Page pagination enforcing between 2-9 photos (weighted to 3-6) and max 1 or 2 kinds per page
                 var pages = new List<AlbumPage>();
                 int pageCounter = 1;
 
@@ -86,7 +94,6 @@ namespace PhotoApp2.Services
 
                 progress?.Report($"Exporting {pages.Count} album pages to {destFolderPath}...");
 
-                // 5. Folder export with names "Page_001_<theme>" and visual HTML preview catalog
                 Directory.CreateDirectory(destFolderPath);
                 foreach (var page in pages)
                 {
@@ -126,31 +133,67 @@ namespace PhotoApp2.Services
             if (sortedPhotos.Count <= 1) return sortedPhotos;
 
             var result = new List<PhotoItem>();
-            var burstWindow = new List<PhotoItem>();
-            DateTime lastTimestamp = sortedPhotos.First().DateTaken;
+            var currentGroup = new List<PhotoItem> { sortedPhotos[0] };
 
-            foreach (var photo in sortedPhotos)
+            for (int i = 1; i < sortedPhotos.Count; i++)
             {
-                if ((photo.DateTaken - lastTimestamp).TotalSeconds <= windowSeconds)
+                var prevPhoto = sortedPhotos[i - 1];
+                var photo = sortedPhotos[i];
+
+                if ((photo.DateTaken - prevPhoto.DateTaken).TotalSeconds <= windowSeconds)
                 {
-                    burstWindow.Add(photo);
+                    currentGroup.Add(photo);
                 }
                 else
                 {
-                    // Pick the highest scoring shot from the closed burst window
-                    result.Add(burstWindow.OrderByDescending(CalculatePhotoScore).First());
-                    burstWindow.Clear();
-                    burstWindow.Add(photo);
+                    ProcessBurstGroup(currentGroup, result);
+                    currentGroup.Clear();
+                    currentGroup.Add(photo);
                 }
-                lastTimestamp = photo.DateTaken;
             }
 
-            if (burstWindow.Any())
+            if (currentGroup.Any())
             {
-                result.Add(burstWindow.OrderByDescending(CalculatePhotoScore).First());
+                ProcessBurstGroup(currentGroup, result);
             }
 
-            return result;
+            return result.OrderBy(p => p.DateTaken).ToList();
+        }
+
+        private void ProcessBurstGroup(List<PhotoItem> group, List<PhotoItem> result)
+        {
+            if (group.Count == 1)
+            {
+                result.Add(group[0]);
+                return;
+            }
+
+            var retained = new List<PhotoItem>();
+            foreach (var photo in group)
+            {
+                bool isDuplicate = false;
+                for (int r = 0; r < retained.Count; r++)
+                {
+                    var existing = retained[r];
+                    double sim = OnnxContentClassifier.CalculateCosineSimilarity(photo.VisualFeatureVector, existing.VisualFeatureVector);
+                    if (sim >= 0.92)
+                    {
+                        isDuplicate = true;
+                        if (CalculatePhotoScore(photo) > CalculatePhotoScore(existing))
+                        {
+                            retained[r] = photo;
+                        }
+                        break;
+                    }
+                }
+
+                if (!isDuplicate)
+                {
+                    retained.Add(photo);
+                }
+            }
+
+            result.AddRange(retained);
         }
 
         private static double CalculatePhotoScore(PhotoItem p)
@@ -158,13 +201,11 @@ namespace PhotoApp2.Services
             double score = p.SharpnessScore + (p.FaceCount * 200);
             if (p.IsFavorite) score += 2000;
 
-            if (!string.IsNullOrEmpty(p.Keywords))
+            if (p.Tags != null && p.Tags.Any())
             {
-                if (p.Keywords.Contains("beautiful landscape", StringComparison.OrdinalIgnoreCase)) score += 300;
-                if (p.Keywords.Contains("architecture", StringComparison.OrdinalIgnoreCase) || 
-                    p.Keywords.Contains("landmark", StringComparison.OrdinalIgnoreCase)) score += 200;
-                if (p.Keywords.Contains("sunset", StringComparison.OrdinalIgnoreCase) || 
-                    p.Keywords.Contains("waterfront", StringComparison.OrdinalIgnoreCase)) score += 200;
+                if (p.Tags.Any(t => t.Contains("landscape", StringComparison.OrdinalIgnoreCase))) score += 300;
+                if (p.Tags.Any(t => t.Contains("architecture", StringComparison.OrdinalIgnoreCase) || t.Contains("landmark", StringComparison.OrdinalIgnoreCase))) score += 200;
+                if (p.Tags.Any(t => t.Contains("sunset", StringComparison.OrdinalIgnoreCase) || t.Contains("beach", StringComparison.OrdinalIgnoreCase))) score += 200;
             }
 
             return score;
@@ -174,25 +215,42 @@ namespace PhotoApp2.Services
         {
             var pages = new List<AlbumPage>();
             var currentPagePhotos = new List<PhotoItem>();
-            int targetCapacity = PickNextPageCapacity();
 
             foreach (var photo in episodePhotos)
             {
-                // Enforce max 1 or 2 kinds per page
-                var tentativeKinds = currentPagePhotos.Select(p => p.PrimaryKind)
-                                                      .Concat(new[] { photo.PrimaryKind })
-                                                      .Where(k => !string.IsNullOrEmpty(k))
-                                                      .Distinct()
-                                                      .ToList();
-
-                bool exceedsKinds = tentativeKinds.Count > 2;
-                bool reachesCap = currentPagePhotos.Count >= targetCapacity;
-
-                if (currentPagePhotos.Any() && (reachesCap || exceedsKinds))
+                if (currentPagePhotos.Any())
                 {
-                    pages.Add(CreateAlbumPage(currentPagePhotos, pageCounter++));
-                    currentPagePhotos = new List<PhotoItem>();
-                    targetCapacity = PickNextPageCapacity();
+                    var tentativeKinds = currentPagePhotos.Select(p => GetPrimaryTag(p))
+                                                          .Concat(new[] { GetPrimaryTag(photo) })
+                                                          .Where(k => !string.IsNullOrEmpty(k))
+                                                          .Distinct()
+                                                          .ToList();
+
+                    bool exceedsKinds = tentativeKinds.Count > 2;
+
+                    int targetCap = DetermineTargetCapacity(currentPagePhotos);
+                    bool reachesCap = currentPagePhotos.Count >= targetCap;
+
+                    bool violatesVisualSynergy = false;
+                    if (photo.VisualFeatureVector != null && currentPagePhotos.Count >= 2)
+                    {
+                        double avgSim = currentPagePhotos
+                            .Where(p => p.VisualFeatureVector != null)
+                            .Select(p => OnnxContentClassifier.CalculateCosineSimilarity(photo.VisualFeatureVector, p.VisualFeatureVector))
+                            .DefaultIfEmpty(1.0)
+                            .Average();
+
+                        if (avgSim < 0.35)
+                        {
+                            violatesVisualSynergy = true;
+                        }
+                    }
+
+                    if (reachesCap || exceedsKinds || violatesVisualSynergy)
+                    {
+                        pages.Add(CreateAlbumPage(currentPagePhotos, pageCounter++));
+                        currentPagePhotos = new List<PhotoItem>();
+                    }
                 }
 
                 currentPagePhotos.Add(photo);
@@ -200,17 +258,16 @@ namespace PhotoApp2.Services
 
             if (currentPagePhotos.Any())
             {
-                // If the last trailing page only has 1 photo, try merging it with the previous page if total <= 9 and <= 2 kinds
                 if (currentPagePhotos.Count == 1 && pages.Any())
                 {
                     var prevPage = pages.Last();
-                    var combinedKinds = prevPage.Photos.Select(p => p.PrimaryKind)
-                                                 .Concat(currentPagePhotos.Select(p => p.PrimaryKind))
+                    var combinedKinds = prevPage.Photos.Select(p => GetPrimaryTag(p))
+                                                 .Concat(currentPagePhotos.Select(p => GetPrimaryTag(p)))
                                                  .Where(k => !string.IsNullOrEmpty(k))
                                                  .Distinct()
                                                  .Count();
 
-                    if (prevPage.Photos.Count < 9 && combinedKinds <= 2)
+                    if (prevPage.Photos.Count < 6 && combinedKinds <= 2)
                     {
                         prevPage.Photos.AddRange(currentPagePhotos);
                         prevPage.Theme = DeterminePageTheme(prevPage.Photos);
@@ -227,19 +284,38 @@ namespace PhotoApp2.Services
             return pages;
         }
 
-        private int PickNextPageCapacity()
+        private static string GetPrimaryTag(PhotoItem photo)
         {
-            // Pick between 2 and 9, with much higher probability to 3-6
-            // Distribution: 2 (10%), 3 (20%), 4 (25%), 5 (20%), 6 (15%), 7 (4%), 8 (3%), 9 (3%) -> 3-6 is 80%
-            int roll = _rand.Next(100);
-            if (roll < 10) return 2;
-            if (roll < 30) return 3;
-            if (roll < 55) return 4;
-            if (roll < 75) return 5;
-            if (roll < 90) return 6;
-            if (roll < 94) return 7;
-            if (roll < 97) return 8;
-            return 9;
+            if (photo.Tags == null || !photo.Tags.Any()) return "Other";
+            return photo.Tags.First();
+        }
+
+        private static int DetermineTargetCapacity(List<PhotoItem> pagePhotos)
+        {
+            if (!pagePhotos.Any()) return 4;
+
+            bool hasHeroCandidate = pagePhotos.Any(p =>
+                p.Tags.Any(t => t.Contains("Landscape", StringComparison.OrdinalIgnoreCase) || t.Contains("Architecture", StringComparison.OrdinalIgnoreCase)) &&
+                p.SharpnessScore >= 80 && p.FaceCount <= 1);
+
+            if (hasHeroCandidate && pagePhotos.Count <= 2)
+            {
+                return 2;
+            }
+
+            bool isSocialOrEvent = pagePhotos.Any(p =>
+                p.FaceCount >= 2 ||
+                p.Tags.Any(t => t.Contains("Food", StringComparison.OrdinalIgnoreCase) ||
+                                t.Contains("Home", StringComparison.OrdinalIgnoreCase) ||
+                                t.Contains("Leisure", StringComparison.OrdinalIgnoreCase) ||
+                                t.Contains("Person", StringComparison.OrdinalIgnoreCase)));
+
+            if (isSocialOrEvent)
+            {
+                return 5;
+            }
+
+            return 4;
         }
 
         private static AlbumPage CreateAlbumPage(List<PhotoItem> photos, int pageNum)
@@ -255,7 +331,7 @@ namespace PhotoApp2.Services
 
         private static string DeterminePageTheme(List<PhotoItem> photos)
         {
-            var kinds = photos.Select(p => p.PrimaryKind)
+            var kinds = photos.Select(p => GetPrimaryTag(p))
                               .Where(k => !string.IsNullOrEmpty(k))
                               .Distinct()
                               .OrderBy(k => k)
@@ -328,7 +404,7 @@ namespace PhotoApp2.Services
                 foreach (var photo in page.Photos)
                 {
                     string relPath = $"{pageFolderName}/{page.PageNumber:D3}_{pIdx:D2}_{photo.FileName}";
-                    string caption = string.IsNullOrEmpty(photo.Keywords) ? photo.FileName : photo.Keywords;
+                    string caption = photo.TagsDisplay;
                     html.AppendLine($"<div class='photo-item' title='{photo.FileName} &bull; {caption}'>");
                     html.AppendLine($"<img src='{relPath}' alt='{photo.FileName}' loading='lazy'/>");
                     html.AppendLine($"<div class='photo-tag'>{caption}</div>");

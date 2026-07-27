@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading.Tasks;
 using OpenCvSharp;
@@ -57,33 +59,24 @@ namespace PhotoApp2.Services
 
                 try
                 {
-                    // 1. Fast EXIF extraction via Ping (header only, no pixel decode/re-encode)
                     var exifDate = ExtractExifDateTaken(filePath);
                     if (exifDate.HasValue)
                     {
                         photo.DateTaken = exifDate.Value;
                     }
 
-                    // 2. Shared visual analysis without thread hopping (OpenCV BGR Mat used for Sharpness, GPU Face Detection, and GPU Scene Classification)
-                    var (sharpness, faces, keywords, primaryKind) = AnalyzeVisuals(filePath);
+                    var (sharpness, faces, tags, featureVector) = AnalyzeVisuals(filePath);
                     photo.SharpnessScore = sharpness;
                     photo.FaceCount = faces;
-                    photo.Keywords = keywords;
-                    photo.PrimaryKind = primaryKind;
+                    photo.VisualFeatureVector = featureVector;
 
-                    // 3. Scene Classification
-                    if (photo.FaceCount > 0 && photo.PrimaryKind != "Landscape")
+                    // Add "Person" to tags if a face is detected
+                    var finalTags = new List<string>(tags ?? new List<string>());
+                    if (photo.FaceCount > 0 && !finalTags.Contains("Person", StringComparer.OrdinalIgnoreCase))
                     {
-                        photo.SceneCategory = "Person";
+                        finalTags.Insert(0, "Person");
                     }
-                    else if (!string.IsNullOrEmpty(photo.PrimaryKind))
-                    {
-                        photo.SceneCategory = photo.PrimaryKind;
-                    }
-                    else
-                    {
-                        photo.SceneCategory = "Landscape / Other";
-                    }
+                    photo.Tags = finalTags;
 
                     photo.IsAnalyzed = true;
                 }
@@ -101,7 +94,6 @@ namespace PhotoApp2.Services
         {
             try
             {
-                // Ping header only without decompressing pixel data
                 using var magickImage = new MagickImage();
                 magickImage.Ping(filePath);
                 
@@ -120,15 +112,12 @@ namespace PhotoApp2.Services
                     }
                 }
             }
-            catch
-            {
-                // Fallback date taken remains FileInfo.CreationTime
-            }
+            catch { }
 
             return null;
         }
 
-        private (double Sharpness, int Faces, string Keywords, string PrimaryKind) AnalyzeVisuals(string filePath)
+        private (double Sharpness, int Faces, List<string> Tags, float[]? FeatureVector) AnalyzeVisuals(string filePath)
         {
             try
             {
@@ -151,25 +140,25 @@ namespace PhotoApp2.Services
                         faces = _faceDetector.DetectFaces(mat);
                     }
 
-                    string sceneKeywords = "";
-                    string sceneKind = "Other";
+                    List<string> sceneTags = new();
+                    float[]? featureVec = null;
+
                     if (_contentClassifier != null)
                     {
                         var sceneRes = _contentClassifier.ClassifyScene(mat);
-                        sceneKeywords = sceneRes.Keywords;
-                        sceneKind = sceneRes.PrimaryKind;
+                        sceneTags = sceneRes.Tags;
+                        featureVec = sceneRes.FeatureVector;
                     }
 
-                    return SynthesizeKeywords(faces, sceneKeywords, sceneKind, sharpness);
+                    return (sharpness, faces, sceneTags, featureVec);
                 }
             }
             catch { }
 
-            // Fallback for non-standard image formats (e.g. HEIC/RAW) via ImageMagick transcode
             double fallbackSharpness = 0;
             int fallbackFaces = 0;
-            string fallbackKeywords = "";
-            string fallbackKind = "Other";
+            List<string> fallbackTags = new();
+            float[]? fallbackFeatureVec = null;
 
             try
             {
@@ -196,41 +185,14 @@ namespace PhotoApp2.Services
                     if (_contentClassifier != null)
                     {
                         var sceneRes = _contentClassifier.ClassifyScene(fallbackMat);
-                        fallbackKeywords = sceneRes.Keywords;
-                        fallbackKind = sceneRes.PrimaryKind;
+                        fallbackTags = sceneRes.Tags;
+                        fallbackFeatureVec = sceneRes.FeatureVector;
                     }
                 }
             }
             catch { }
 
-            return SynthesizeKeywords(fallbackFaces, fallbackKeywords, fallbackKind, fallbackSharpness);
-        }
-
-        private static (double Sharpness, int Faces, string Keywords, string PrimaryKind) SynthesizeKeywords(int faces, string sceneKeywords, string sceneKind, double sharpness)
-        {
-            string keywords = sceneKeywords ?? "";
-            string primaryKind = sceneKind ?? "Other";
-
-            if (faces > 0)
-            {
-                var faceTag = faces >= 3 ? "group portrait, person" : "person";
-                keywords = string.IsNullOrEmpty(keywords) ? faceTag : $"{faceTag}, {keywords}";
-                
-                if (primaryKind == "Landscape" || primaryKind == "Architecture")
-                {
-                    primaryKind = $"{primaryKind}_and_Person";
-                }
-                else if (primaryKind == "Other" || primaryKind == "Animal" || string.IsNullOrEmpty(primaryKind))
-                {
-                    primaryKind = "Person";
-                }
-            }
-            else if (string.IsNullOrEmpty(primaryKind))
-            {
-                primaryKind = "Other";
-            }
-
-            return (sharpness, faces, keywords, primaryKind);
+            return (fallbackSharpness, fallbackFaces, fallbackTags, fallbackFeatureVec);
         }
     }
 }

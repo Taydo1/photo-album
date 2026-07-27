@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace PhotoApp2.Models
@@ -17,9 +19,10 @@ namespace PhotoApp2.Models
         public bool IsAnalyzed { get; set; }
         public double SharpnessScore { get; set; }
         public int FaceCount { get; set; }
-        public string SceneCategory { get; set; } = string.Empty; // e.g., "Landscape", "Building", "Person", "Other"
-        public string Keywords { get; set; } = string.Empty; // e.g., "person, beautiful landscape, sunset"
-        public string PrimaryKind { get; set; } = string.Empty; // e.g., "Landscape", "Person", "Architecture"
+        public List<string> Tags { get; set; } = new();
+        public float[]? VisualFeatureVector { get; set; }
+
+        public string TagsDisplay => Tags != null && Tags.Any() ? string.Join(", ", Tags) : "Untagged";
 
         [ObservableProperty]
         private bool _isFavorite;

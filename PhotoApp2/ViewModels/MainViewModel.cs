@@ -220,7 +220,8 @@ namespace PhotoApp2.ViewModels
                         photo.IsAnalyzed = true;
                         photo.SharpnessScore = analyzedPhoto.SharpnessScore;
                         photo.FaceCount = analyzedPhoto.FaceCount;
-                        photo.SceneCategory = analyzedPhoto.SceneCategory;
+                        photo.Tags = analyzedPhoto.Tags;
+                        photo.VisualFeatureVector = analyzedPhoto.VisualFeatureVector;
 
                         if (analyzedPhoto.DateTaken != default && analyzedPhoto.DateTaken != photo.DateTaken)
                         {

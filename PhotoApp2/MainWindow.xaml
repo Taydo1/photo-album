@@ -83,7 +83,7 @@
                             <Border Background="#80000000" VerticalAlignment="Bottom" Padding="4">
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Text="{x:Bind FaceCount}" Foreground="White" FontSize="10" Margin="0,0,8,0"/>
-                                    <TextBlock Text="{x:Bind SceneCategory}" Foreground="White" FontSize="10"/>
+                                    <TextBlock Text="{x:Bind TagsDisplay, Mode=OneWay}" Foreground="White" FontSize="10" TextTrimming="CharacterEllipsis"/>
                                 </StackPanel>
                             </Border>
                             <FontIcon Glyph="&#xE735;" 
@@ -110,7 +110,7 @@
                 <StackPanel Grid.Row="1" Spacing="8" Margin="0,12,0,0">
                     <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.FileName, Mode=OneWay}" FontWeight="Bold" TextWrapping="Wrap" FontSize="18"/>
                     <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.DateTaken, Mode=OneWay}"/>
-                    <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.SceneCategory, Mode=OneWay}"/>
+                    <TextBlock Text="{x:Bind ViewModel.SelectedPhoto.TagsDisplay, Mode=OneWay}" TextWrapping="Wrap" FontSize="14" Foreground="{ThemeResource SystemControlForegroundAccentBrush}"/>
                     
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <TextBlock Text="Sharpness:"/>
