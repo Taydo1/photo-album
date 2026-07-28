@@ -37,7 +37,12 @@ namespace PhotoApp2.Services
         {
             return Task.Run(() =>
             {
-                progress?.Report("Deduplicating rapid burst shots and cleaning photo candidates...");
+                progress?.Report("Calibrating timestamps and cleaning photo candidates...");
+
+                foreach (var photo in allPhotos)
+                {
+                    photo.DateTaken = CalibrateDateTaken(photo);
+                }
 
                 var candidates = allPhotos.Where(p => ((p.IsAnalyzed && p.SharpnessScore > 50) || p.IsFavorite) && !HasExcludedAlbumTag(p))
                                           .OrderBy(p => p.DateTaken)
@@ -46,13 +51,16 @@ namespace PhotoApp2.Services
                 if (!candidates.Any())
                     return new List<AlbumPage>();
 
-                // Deduplicate rapid bursts within a 15-second window across the entire timeline
-                var deduplicated = DeduplicateBursts(candidates, 15.0);
+                // Step 1: Deduplicate rapid bursts within a 15-second window
+                var burstCleaned = DeduplicateBursts(candidates, 15.0);
 
-                progress?.Report("Clustering photos into meaningful moments (meals, daily events, week-long trips)...");
+                // Step 2: Extended Scene Curation (10-minute window) to select representative highlights and eliminate repetitive outtakes
+                var sceneCurated = CurateSimilarScenes(burstCleaned, 600.0);
+
+                progress?.Report("Clustering photos into meaningful real-world moments and applying highlight curation...");
 
                 int pageCounter = 1;
-                var pages = ClusterIntoMoments(deduplicated, ref pageCounter);
+                var pages = ClusterIntoMoments(sceneCurated, ref pageCounter);
 
                 progress?.Report($"Exporting {pages.Count} album pages to {destFolderPath}...");
 
@@ -173,6 +181,157 @@ namespace PhotoApp2.Services
             return score;
         }
 
+        public static DateTime CalibrateDateTaken(PhotoItem photo)
+        {
+            DateTime current = photo.DateTaken;
+            DateTime bestDate = current;
+
+            // 1. Check file modification time (LastWriteTime vs CreationTime) as a physical file fallback
+            try
+            {
+                if (File.Exists(photo.FilePath))
+                {
+                    var fi = new FileInfo(photo.FilePath);
+                    var earliestFileDate = fi.CreationTime < fi.LastWriteTime ? fi.CreationTime : fi.LastWriteTime;
+                    if (earliestFileDate < bestDate && earliestFileDate.Year >= 1980 && earliestFileDate.Year <= DateTime.Now.Year + 1)
+                    {
+                        bestDate = earliestFileDate;
+                    }
+                }
+            }
+            catch { }
+
+            // 2. Extract timestamp from filename (e.g. IMG-20180125-WA0017, IMG20210102151606, 20210523_102828)
+            var filenameDate = ParseDateFromFileName(photo.FileName, bestDate);
+            if (filenameDate.HasValue)
+            {
+                bestDate = filenameDate.Value;
+            }
+
+            return bestDate;
+        }
+
+        private static DateTime? ParseDateFromFileName(string fileName, DateTime fallbackTime)
+        {
+            if (string.IsNullOrWhiteSpace(fileName)) return null;
+
+            try
+            {
+                string nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
+
+                // Pattern for yyyyMMddHHmmss (e.g. IMG20210102151606, 20210102_151606, VID_20210102_151606)
+                var fullMatch = System.Text.RegularExpressions.Regex.Match(nameWithoutExt, @"(20\d{2})[-_]?((?:0[1-9]|1[0-2]))[-_]?((?:0[1-9]|[12]\d|3[01]))[-_ ]?(([01]\d|2[0-3]))[-_]?(([0-5]\d))[-_]?(([0-5]\d))");
+                if (fullMatch.Success)
+                {
+                    int year = int.Parse(fullMatch.Groups[1].Value);
+                    int month = int.Parse(fullMatch.Groups[2].Value);
+                    int day = int.Parse(fullMatch.Groups[3].Value);
+                    int hour = int.Parse(fullMatch.Groups[4].Value);
+                    int min = int.Parse(fullMatch.Groups[6].Value);
+                    int sec = int.Parse(fullMatch.Groups[8].Value);
+                    return new DateTime(year, month, day, hour, min, sec);
+                }
+
+                // Pattern for yyyyMMdd (e.g. IMG-20180125-WA0017, Screenshot_20210815)
+                var dateMatch = System.Text.RegularExpressions.Regex.Match(nameWithoutExt, @"(20\d{2})[-_]?((?:0[1-9]|1[0-2]))[-_]?((?:0[1-9]|[12]\d|3[01]))");
+                if (dateMatch.Success)
+                {
+                    int year = int.Parse(dateMatch.Groups[1].Value);
+                    int month = int.Parse(dateMatch.Groups[2].Value);
+                    int day = int.Parse(dateMatch.Groups[3].Value);
+
+                    return new DateTime(year, month, day, fallbackTime.Hour, fallbackTime.Minute, fallbackTime.Second);
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private List<PhotoItem> CurateSimilarScenes(List<PhotoItem> sortedPhotos, double windowSeconds)
+        {
+            if (sortedPhotos.Count <= 1) return sortedPhotos;
+
+            var result = new List<PhotoItem>();
+            var sceneBuffer = new List<PhotoItem>();
+            DateTime sceneStartTime = DateTime.MinValue;
+
+            foreach (var photo in sortedPhotos)
+            {
+                if (!sceneBuffer.Any())
+                {
+                    sceneBuffer.Add(photo);
+                    sceneStartTime = photo.DateTaken;
+                    continue;
+                }
+
+                string currentParentDir = Path.GetDirectoryName(photo.FilePath) ?? "";
+                string lastParentDir = Path.GetDirectoryName(sceneBuffer.Last().FilePath) ?? "";
+
+                if ((photo.DateTaken - sceneStartTime).TotalSeconds <= windowSeconds &&
+                    (photo.DateTaken - sceneBuffer.Last().DateTaken).TotalMinutes <= 5.0 &&
+                    string.Equals(currentParentDir, lastParentDir, StringComparison.OrdinalIgnoreCase))
+                {
+                    sceneBuffer.Add(photo);
+                }
+                else
+                {
+                    ProcessSceneBuffer(sceneBuffer, result);
+                    sceneBuffer.Clear();
+                    sceneBuffer.Add(photo);
+                    sceneStartTime = photo.DateTaken;
+                }
+            }
+
+            if (sceneBuffer.Any())
+            {
+                ProcessSceneBuffer(sceneBuffer, result);
+            }
+
+            return result.OrderBy(p => p.DateTaken).ToList();
+        }
+
+        private void ProcessSceneBuffer(List<PhotoItem> buffer, List<PhotoItem> result)
+        {
+            if (buffer.Count <= 2)
+            {
+                result.AddRange(buffer);
+                return;
+            }
+
+            var selected = new List<PhotoItem>();
+            foreach (var photo in buffer.OrderByDescending(CalculatePhotoScore))
+            {
+                if (photo.IsFavorite)
+                {
+                    selected.Add(photo);
+                    continue;
+                }
+
+                bool isTooSimilar = false;
+                foreach (var existing in selected)
+                {
+                    double sim = OnnxContentClassifier.CalculateCosineSimilarity(photo.VisualFeatureVector, existing.VisualFeatureVector);
+                    string tag1 = GetPrimaryTag(photo);
+                    string tag2 = GetPrimaryTag(existing);
+
+                    // Only discard genuine visual near-duplicates or redundant successive attempts
+                    if (sim >= 0.85 || (sim >= 0.78 && tag1 == tag2 && tag1 != "Other" && photo.FaceCount == existing.FaceCount))
+                    {
+                        isTooSimilar = true;
+                        break;
+                    }
+                }
+
+                if (!isTooSimilar)
+                {
+                    selected.Add(photo);
+                }
+            }
+
+            result.AddRange(selected.OrderBy(p => p.DateTaken));
+        }
+
         private List<AlbumPage> ClusterIntoMoments(List<PhotoItem> sortedPhotos, ref int pageCounter)
         {
             var pages = new List<AlbumPage>();
@@ -184,7 +343,11 @@ namespace PhotoApp2.Services
                 {
                     if (ShouldSplitMoment(currentMomentPhotos, photo))
                     {
-                        pages.Add(CreateAlbumPage(currentMomentPhotos, pageCounter++));
+                        var filtered = FilterOddOneOutPhotos(currentMomentPhotos);
+                        if (filtered.Count >= 3 || filtered.Any(p => p.IsFavorite))
+                        {
+                            pages.Add(CreateAlbumPage(filtered, pageCounter++));
+                        }
                         currentMomentPhotos = new List<PhotoItem>();
                     }
                 }
@@ -194,10 +357,87 @@ namespace PhotoApp2.Services
 
             if (currentMomentPhotos.Any())
             {
-                pages.Add(CreateAlbumPage(currentMomentPhotos, pageCounter++));
+                var filtered = FilterOddOneOutPhotos(currentMomentPhotos);
+                if (filtered.Count >= 3 || filtered.Any(p => p.IsFavorite))
+                {
+                    pages.Add(CreateAlbumPage(filtered, pageCounter++));
+                }
             }
 
             return pages;
+        }
+
+        private static List<PhotoItem> FilterOddOneOutPhotos(List<PhotoItem> photos)
+        {
+            if (photos.Count <= 2) return photos;
+
+            // Collect thematic tags across the moment, ignoring super-generic tags that don't define a specific activity scene
+            var genericTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Person", "Other", "People & Social", "Photography", "Selfie", "Portrait", "Photo", "Image", "Collection", "Leisure & Recreation"
+            };
+
+            var photoThemes = new Dictionary<PhotoItem, HashSet<string>>();
+            var themeFrequencies = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var p in photos)
+            {
+                var tags = (p.Tags ?? new List<string>())
+                            .Where(t => !string.IsNullOrWhiteSpace(t) && !genericTags.Contains(t))
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                photoThemes[p] = tags;
+                foreach (var tag in tags)
+                {
+                    themeFrequencies[tag] = themeFrequencies.GetValueOrDefault(tag) + 1;
+                }
+            }
+
+            // A sub-group theme is dominant/valid if several (>= 2) photos in the moment share that theme
+            int minSubGroupSize = photos.Count >= 5 ? 2 : 1;
+            var dominantThemes = themeFrequencies.Where(kv => kv.Value >= minSubGroupSize)
+                                                 .Select(kv => kv.Key)
+                                                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (!dominantThemes.Any()) return photos;
+
+            var filtered = new List<PhotoItem>();
+            foreach (var photo in photos)
+            {
+                if (photo.IsFavorite)
+                {
+                    filtered.Add(photo);
+                    continue;
+                }
+
+                var myTags = photoThemes[photo];
+                bool matchesDominantTheme = myTags.Any(t => dominantThemes.Contains(t));
+
+                if (matchesDominantTheme)
+                {
+                    filtered.Add(photo);
+                }
+                else
+                {
+                    // Check if this photo has several similar photos forming a coherent sub-group within the moment
+                    int similarSubGroupCount = photos.Count(other =>
+                        other == photo ||
+                        (photoThemes[other].Any() && photoThemes[other].Any(t => myTags.Contains(t))) ||
+                        OnnxContentClassifier.CalculateCosineSimilarity(photo.VisualFeatureVector, other.VisualFeatureVector) >= 0.78
+                    );
+
+                    if (similarSubGroupCount >= 3 || (photos.Count <= 4 && similarSubGroupCount >= 2))
+                    {
+                        filtered.Add(photo);
+                    }
+                    else
+                    {
+                        Debug.WriteLine($"Excluding odd-one-out photo {photo.FileName} from moment.");
+                    }
+                }
+            }
+
+            return filtered.Any() ? filtered : photos;
         }
 
         private static bool ShouldSplitMoment(List<PhotoItem> currentPhotos, PhotoItem candidate)
@@ -210,31 +450,35 @@ namespace PhotoApp2.Services
             double gapHours = (candidate.DateTaken - lastPhoto.DateTaken).TotalHours;
             double totalSpanHours = (candidate.DateTaken - firstPhoto.DateTaken).TotalHours;
 
+            // 0. Hard separation: overnight intermissions (> 5 hours) or calendar day transitions (> 3 hours gap) ALWAYS separate moments.
+            if (gapHours > 5.0 || (candidate.DateTaken.Date != lastPhoto.DateTaken.Date && gapHours > 3.0))
+            {
+                return true;
+            }
+
             // 1. Determine moment duration thresholds based on semantic tags of the current moment
-            GetMomentTimeThresholds(currentPhotos, out double maxGapHours, out double maxSpanHours);
+            GetMomentTimeThresholds(currentPhotos, out double maxGapHours, out double maxSpanHours, out _);
 
             if (gapHours > maxGapHours || totalSpanHours > maxSpanHours)
             {
-                return true; // Chronological boundary exceeded for this moment type
+                return true; // Chronological boundary exceeded for this activity type
             }
 
-            // 2. Tolerance for wrong tags / misclassifications:
-            // If photos are taken close together in time (<= 2.5 hours), NEVER break the moment on tag differences.
-            if (gapHours <= 2.5)
+            // 2. Time-proximity noise tolerance: Within 25 minutes (0.42 hours), never break on tag divergence or classification noise.
+            if (gapHours <= 0.42)
             {
                 return false;
             }
 
-            // 3. For wider gaps within the allowed threshold (> 2.5 hours but <= maxGapHours),
+            // 3. For moderate intervals within the allowed threshold (> 25 mins but <= maxGapHours),
             // check for a sustained thematic divergence rather than an isolated outlier tag.
-            // We tolerate up to 2 mismatched photos (or up to 30% of total) before deciding the moment theme has shifted.
             string candidateTag = GetPrimaryTag(candidate);
             var dominantTags = GetDominantTags(currentPhotos);
 
             if (!dominantTags.Contains(candidateTag, StringComparer.OrdinalIgnoreCase))
             {
                 int existingOutliers = currentPhotos.Count(p => !dominantTags.Contains(GetPrimaryTag(p), StringComparer.OrdinalIgnoreCase));
-                if (existingOutliers + 1 > Math.Max(2, currentPhotos.Count * 0.3))
+                if (existingOutliers + 1 > Math.Max(1, currentPhotos.Count * 0.25))
                 {
                     return true;
                 }
@@ -243,40 +487,33 @@ namespace PhotoApp2.Services
             return false;
         }
 
-        private static void GetMomentTimeThresholds(IEnumerable<PhotoItem> momentPhotos, out double maxGapHours, out double maxSpanHours)
+        private static void GetMomentTimeThresholds(IEnumerable<PhotoItem> momentPhotos, out double maxGapHours, out double maxSpanHours, out int maxHighlights)
         {
             var allTags = momentPhotos.SelectMany(p => p.Tags ?? new List<string>()).Where(t => !string.IsNullOrEmpty(t)).ToList();
             if (!allTags.Any())
             {
-                // Default to Day outing moment
-                maxGapHours = 16.0;
-                maxSpanHours = 36.0;
+                maxGapHours = 3.0;   // 3 hours intermission separates daily excursions
+                maxSpanHours = 8.0;  // 8 hours max per daytime event chapter
+                maxHighlights = 20;  // 20 curated highlights maximum
                 return;
             }
 
             int mealTags = allTags.Count(t => ContainsAny(t, "Food", "Dining", "Drink", "Restaurant", "Cafe", "Meal", "Kitchen", "Bar", "Beverage"));
-            int weekTags = allTags.Count(t => ContainsAny(t, "Landscape", "Nature", "Travel", "Resort", "Vacation", "Beach", "Coast", "Mountain", "Sunset", "Waterfront", "Forest", "Sea", "Wildlife", "Animal", "Holiday", "Scenic", "Lake", "Valley", "Cliff"));
             int total = allTags.Count;
 
-            // Meal or dining gathering (short moment)
-            if (mealTags > 0 && (mealTags * 100.0 / total) >= 35)
+            // Meal or dining gathering
+            if (mealTags > 0 && (mealTags * 100.0 / total) >= 30)
             {
-                maxGapHours = 3.5;
-                maxSpanHours = 8.0;
+                maxGapHours = 1.5;  // 1.5 hours gap (e.g., between appetizers and dessert/after-drinks)
+                maxSpanHours = 3.5; // 3.5 hours max duration for a banquet or dinner gathering
+                maxHighlights = 10; // 10 highlights maximum
                 return;
             }
 
-            // Week-long vacation, nature, or scenic trip (extended moment)
-            if (weekTags > 0 && (weekTags * 100.0 / total) >= 35)
-            {
-                maxGapHours = 72.0;   // Allow up to 3 days gap between contiguous trip shots
-                maxSpanHours = 240.0; // Allow up to 10 days total duration
-                return;
-            }
-
-            // Day outing, event, or social activity
-            maxGapHours = 16.0;  // Overnight gap separates day outings
-            maxSpanHours = 36.0; // Allow up to 36 hours for all-day/night events
+            // Outing, activity, landscape, resort, or scenic excursion chapter
+            maxGapHours = 3.0;   // 3 hours intermission separates major activities on a trip
+            maxSpanHours = 8.0;  // 8 hours max contiguous span per activity chapter
+            maxHighlights = 25;  // 25 curated highlights maximum per activity moment
         }
 
         private static bool ContainsAny(string tag, params string[] keywords)
@@ -297,13 +534,35 @@ namespace PhotoApp2.Services
 
         private static AlbumPage CreateAlbumPage(List<PhotoItem> photos, int pageNum)
         {
+            var curated = CurateMomentHighlights(photos);
             var page = new AlbumPage
             {
                 PageNumber = pageNum,
-                Photos = new List<PhotoItem>(photos),
-                Theme = DeterminePageTheme(photos)
+                Photos = new List<PhotoItem>(curated),
+                Theme = DeterminePageTheme(curated)
             };
             return page;
+        }
+
+        private static List<PhotoItem> CurateMomentHighlights(List<PhotoItem> momentPhotos)
+        {
+            if (momentPhotos.Count <= 12) return momentPhotos;
+
+            GetMomentTimeThresholds(momentPhotos, out _, out _, out int maxHighlights);
+            if (momentPhotos.Count <= maxHighlights) return momentPhotos;
+
+            var favorites = momentPhotos.Where(p => p.IsFavorite).ToList();
+            int remainingQuota = Math.Max(4, maxHighlights - favorites.Count);
+
+            var bestRemaining = momentPhotos.Where(p => !p.IsFavorite)
+                                            .OrderByDescending(CalculatePhotoScore)
+                                            .Take(remainingQuota)
+                                            .ToList();
+
+            return favorites.Concat(bestRemaining)
+                            .Distinct()
+                            .OrderBy(p => p.DateTaken)
+                            .ToList();
         }
 
         private static List<string> GetDominantTags(IEnumerable<PhotoItem> photos)

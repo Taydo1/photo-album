@@ -138,7 +138,7 @@ namespace PhotoApp2.ViewModels
                         FilePath = file,
                         FileName = fileInfo.Name,
                         FileSizeBytes = fileInfo.Length,
-                        DateTaken = fileInfo.CreationTime,
+                        DateTaken = fileInfo.CreationTime < fileInfo.LastWriteTime ? fileInfo.CreationTime : fileInfo.LastWriteTime,
                         IsAnalyzed = false
                     });
                 }

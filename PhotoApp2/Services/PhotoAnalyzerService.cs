@@ -92,7 +92,7 @@ namespace PhotoApp2.Services
                     FilePath = filePath,
                     FileName = fileInfo.Name,
                     FileSizeBytes = fileInfo.Length,
-                    DateTaken = fileInfo.CreationTime, // Default fallback
+                    DateTaken = fileInfo.CreationTime < fileInfo.LastWriteTime ? fileInfo.CreationTime : fileInfo.LastWriteTime, // Robust default fallback
                 };
 
                 try
@@ -101,6 +101,10 @@ namespace PhotoApp2.Services
                     if (exifDate.HasValue)
                     {
                         photo.DateTaken = exifDate.Value;
+                    }
+                    else
+                    {
+                        photo.DateTaken = AlbumGeneratorService.CalibrateDateTaken(photo);
                     }
 
                     var (sharpness, faces, tags, featureVector) = AnalyzeVisuals(filePath);

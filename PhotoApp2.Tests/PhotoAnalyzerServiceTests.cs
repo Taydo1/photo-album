@@ -234,7 +234,7 @@ namespace PhotoApp2.Tests
             {
                 var simPhotos = new List<Models.PhotoItem>
                 {
-                    new Models.PhotoItem { Id = 1, FilePath = "fake1.jpg", FileName = "fake1.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = DateTime.Today.AddHours(1), Tags = new List<string> { "Landscape" }, VisualFeatureVector = new float[] { 1f, 0f, 0f } },
+                    new Models.PhotoItem { Id = 1, FilePath = "fake1.jpg", FileName = "fake1.jpg", IsAnalyzed = true, SharpnessScore = 100, IsFavorite = true, DateTaken = DateTime.Today.AddHours(1), Tags = new List<string> { "Landscape" }, VisualFeatureVector = new float[] { 1f, 0f, 0f } },
                     new Models.PhotoItem { Id = 2, FilePath = "fake2.jpg", FileName = "fake2.jpg", IsAnalyzed = true, SharpnessScore = 120, DateTaken = DateTime.Today.AddHours(2), Tags = new List<string> { "Screenshot", "Computer & Tech" }, VisualFeatureVector = new float[] { 0f, 1f, 0f } },
                     new Models.PhotoItem { Id = 3, FilePath = "fake3.jpg", FileName = "fake3.jpg", IsAnalyzed = true, SharpnessScore = 110, DateTaken = DateTime.Today.AddHours(3), Tags = new List<string> { "Document", "Paper" }, VisualFeatureVector = new float[] { 0f, 0f, 1f } },
                     new Models.PhotoItem { Id = 4, FilePath = "fake4.jpg", FileName = "fake4.jpg", IsAnalyzed = true, SharpnessScore = 105, DateTaken = DateTime.Today.AddHours(4), Tags = new List<string> { "Uninteresting", "Blurry" }, VisualFeatureVector = new float[] { 0.5f, 0.5f, 0f } }
@@ -382,21 +382,23 @@ namespace PhotoApp2.Tests
                 var baseDate = new DateTime(2026, 7, 1, 12, 0, 0);
                 var photos = new List<Models.PhotoItem>
                 {
-                    // Meal Moment: tags indicate Food & Dining -> 3.5h max gap separates meal moments
+                    // Meal Moment: tags indicate Food & Dining -> 1.5h max gap separates meal courses/drinks
                     new Models.PhotoItem { Id = 1, FilePath = "m1.jpg", FileName = "m1.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate, Tags = new List<string> { "Food & Dining" } },
                     new Models.PhotoItem { Id = 2, FilePath = "m2.jpg", FileName = "m2.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(1), Tags = new List<string> { "Restaurant" } },
                     // Tolerance check: m3 has a wrong/misclassified tag ("Work & Industry"), but taken 30m after m2 -> must NOT break the meal moment!
                     new Models.PhotoItem { Id = 3, FilePath = "m3.jpg", FileName = "m3.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(1.5), Tags = new List<string> { "Work & Industry" } },
 
-                    // Week/Landscape Moment: starts 5 hours later (>3.5h gap from meal). Because dominant tags are Landscape/Vacation, it allows multi-day gaps (up to 72h).
-                    new Models.PhotoItem { Id = 4, FilePath = "w1.jpg", FileName = "w1.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(8), Tags = new List<string> { "Landscape", "Beach" } },
-                    new Models.PhotoItem { Id = 5, FilePath = "w2.jpg", FileName = "w2.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(8 + 48), Tags = new List<string> { "Vacation", "Resort" } },
-                    new Models.PhotoItem { Id = 6, FilePath = "w3.jpg", FileName = "w3.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(8 + 52), Tags = new List<string> { "Mountain" } }
+                    // Vacation Trip Chapter 1: starts 6.5 hours later (>3h gap from meal). Labeled favorite to retain smaller chapter.
+                    new Models.PhotoItem { Id = 4, FilePath = "w1.jpg", FileName = "w1.jpg", IsAnalyzed = true, SharpnessScore = 100, IsFavorite = true, DateTaken = baseDate.AddHours(8), Tags = new List<string> { "Landscape", "Beach" } },
+
+                    // Vacation Trip Chapter 2 (2 days later): Daily chapter segmentation separates Day 1 from Day 3 to avoid single-page monster moments.
+                    new Models.PhotoItem { Id = 5, FilePath = "w2.jpg", FileName = "w2.jpg", IsAnalyzed = true, SharpnessScore = 100, IsFavorite = true, DateTaken = baseDate.AddHours(8 + 48), Tags = new List<string> { "Vacation", "Resort" } },
+                    new Models.PhotoItem { Id = 6, FilePath = "w3.jpg", FileName = "w3.jpg", IsAnalyzed = true, SharpnessScore = 100, DateTaken = baseDate.AddHours(8 + 50), Tags = new List<string> { "Mountain" } }
                 };
 
                 var pages = await generator.GenerateAlbumAsync(photos, tempDir);
 
-                Assert.True(pages.Count >= 2, $"Expected at least 2 moment pages (Meal and Vacation), got {pages.Count}");
+                Assert.True(pages.Count >= 3, $"Expected at least 3 moment chapters (Meal, Vacation Day 1, Vacation Day 3), got {pages.Count}");
 
                 // Page 1 is the Meal moment: photos 1, 2, 3 (including the misclassified photo 3)
                 var page1Ids = pages[0].Photos.Select(p => p.Id).ToList();
@@ -404,11 +406,59 @@ namespace PhotoApp2.Tests
                 Assert.Contains(2, page1Ids);
                 Assert.Contains(3, page1Ids); // Misclassification gracefully tolerated without breaking page!
 
-                // Page 2 is the Vacation moment: photos 4, 5, 6 across contiguous days
+                // Page 2 is Day 1 Beach Excursion: photo 4
                 var page2Ids = pages[1].Photos.Select(p => p.Id).ToList();
                 Assert.Contains(4, page2Ids);
-                Assert.Contains(5, page2Ids);
-                Assert.Contains(6, page2Ids);
+                Assert.DoesNotContain(5, page2Ids); // Separated across multi-day gap into next chapter
+
+                // Page 3 is Day 3 Resort/Mountain Excursion: photos 5, 6
+                var page3Ids = pages[2].Photos.Select(p => p.Id).ToList();
+                Assert.Contains(5, page3Ids);
+                Assert.Contains(6, page3Ids);
+            }
+            finally
+            {
+                if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+            }
+        }
+
+        [Fact]
+        public async Task AlbumGeneratorService_SkipsTrivialPages_AndExcludesOddOneOutPhotos()
+        {
+            var generator = new AlbumGeneratorService();
+            var tempDir = Path.Combine(Path.GetTempPath(), "PhotoApp2_TestAlbum_OddOne_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            try
+            {
+                var baseDate = new DateTime(2026, 7, 10, 10, 0, 0);
+                var photos = new List<Models.PhotoItem>
+                {
+                    // Moment 1: Landscape & Hiking outing with 4 nature shots + 1 odd-one-out selfie
+                    new Models.PhotoItem { Id = 10, FilePath = "l1.jpg", FileName = "l1.jpg", IsAnalyzed = true, SharpnessScore = 80, DateTaken = baseDate, Tags = new List<string> { "Landscape", "Plain", "Meadow", "Countryside" } },
+                    new Models.PhotoItem { Id = 11, FilePath = "l2.jpg", FileName = "l2.jpg", IsAnalyzed = true, SharpnessScore = 80, DateTaken = baseDate.AddMinutes(5), Tags = new List<string> { "Landscape", "Valley", "Hills", "Scenic" } },
+                    new Models.PhotoItem { Id = 12, FilePath = "l3.jpg", FileName = "l3.jpg", IsAnalyzed = true, SharpnessScore = 80, DateTaken = baseDate.AddMinutes(10), Tags = new List<string> { "Person", "Leisure & Recreation", "Landscape", "Hiking", "Mountain", "Trekking" } },
+                    new Models.PhotoItem { Id = 13, FilePath = "l4.jpg", FileName = "l4.jpg", IsAnalyzed = true, SharpnessScore = 80, DateTaken = baseDate.AddMinutes(15), Tags = new List<string> { "Landscape", "Waterfall", "Cascade", "Nature" } },
+                    // Odd one out: No landscape/nature theme tags, isolated sub-group of size 1 -> MUST be excluded!
+                    new Models.PhotoItem { Id = 14, FilePath = "odd.jpg", FileName = "odd.jpg", IsAnalyzed = true, SharpnessScore = 80, DateTaken = baseDate.AddMinutes(18), Tags = new List<string> { "Person", "People & Social", "Selfie", "Photography", "Portrait" } },
+
+                    // Moment 2 (12 hours later): Trivial moment of only 2 un-favorited snapshots -> MUST be skipped entirely!
+                    new Models.PhotoItem { Id = 20, FilePath = "t1.jpg", FileName = "t1.jpg", IsAnalyzed = true, SharpnessScore = 80, DateTaken = baseDate.AddHours(12), Tags = new List<string> { "Indoor", "Office", "Desk" } },
+                    new Models.PhotoItem { Id = 21, FilePath = "t2.jpg", FileName = "t2.jpg", IsAnalyzed = true, SharpnessScore = 80, DateTaken = baseDate.AddHours(12).AddMinutes(5), Tags = new List<string> { "Indoor", "Computer", "Screen" } }
+                };
+
+                var pages = await generator.GenerateAlbumAsync(photos, tempDir);
+
+                // We expect exactly 1 page (Moment 1 kept without the odd photo; Moment 2 completely skipped)
+                Assert.Single(pages);
+
+                var pagePhotos = pages[0].Photos.Select(p => p.Id).ToList();
+                Assert.Equal(4, pagePhotos.Count);
+                Assert.Contains(10, pagePhotos);
+                Assert.Contains(11, pagePhotos);
+                Assert.Contains(12, pagePhotos);
+                Assert.Contains(13, pagePhotos);
+                Assert.DoesNotContain(14, pagePhotos); // Verified: Odd-one-out selfie excluded from landscape moment!
             }
             finally
             {
